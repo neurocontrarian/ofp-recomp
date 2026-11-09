@@ -1,7 +1,9 @@
 # Proposals for pcrecomp (sp00nznet/pcrecomp)
 
 Prepared on 2026-11-07 (4 and 6 rewritten on 2026-11-08) on top of upstream `2adc02f` (#165), still its head on 2026-11-08. One branch per
-patch, author neurocontrarian. Not sent yet.
+patch, author neurocontrarian. **Sent on 2026-11-08** from the fork neurocontrarian/pcrecomp:
+PRs #168 (7), #169 (1), #170 (5), #171 (8), #172 (2), #173 (6), #174 (4), #175 (9), #176 (3),
+and the offer issue #177. The offered host files are also under MIT (LICENSE-MIT.md).
 
 | # | Branch / patch | What it does |
 |---|---|---|
