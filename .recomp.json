@@ -1,0 +1,32 @@
+{
+  "$schema": "https://recomp.fyi/schema/v1.json",
+  "game": "Arma: Cold War Assault",
+  "system": "PC (Windows)",
+  "type": "recomp",
+  "original": {
+    "revision": "1.99"
+  },
+  "project": "OFP Recomp",
+  "status": "in-progress",
+  "targets": [
+    "Linux"
+  ],
+  "toolchain": "pcrecomp",
+  "approach": "ColdWarAssault.exe 1.99 statically recompiled to C with pcrecomp (lift32 + win32hle), 64-bit, Direct3D 8 on Vulkan or OpenGL",
+  "maintainers": [
+    {
+      "name": "neurocontrarian",
+      "link": "https://github.com/neurocontrarian"
+    }
+  ],
+  "help": [
+    "testing on other Linux machines and GPUs",
+    "multiplayer: joining and hosting games"
+  ],
+  "tags": [
+    "Operation Flashpoint",
+    "Direct3D 8",
+    "Vulkan"
+  ],
+  "notes": "Operation Flashpoint: Cold War Crisis as re-released by Bohemia Interactive. Menus, single missions and campaign missions run; about 60 fps on a 2017 desktop CPU at the longest view distance. Direct3D 8 (on Vulkan or OpenGL), DirectInput 8, DirectSound 3D and Winsock are host code. No game file is in the repository: users bring their own copy."
+}

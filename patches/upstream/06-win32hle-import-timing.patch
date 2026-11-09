@@ -1,0 +1,161 @@
+From 132351b9adb9e3d1661d695aa1e5d1306efd1bda Mon Sep 17 00:00:00 2001
+From: neurocontrarian <56934000+neurocontrarian@users.noreply.github.com>
+Date: Sat, 7 Nov 2026 11:39:25 -0500
+Subject: [PATCH] win32hle: per-import timing on the main thread, for a host's
+ profiler
+
+With hle_shim_timing set, shim_entry adds each import's inclusive time
+(a shim that runs guest callbacks counts them) to hle_shim_ns_main[i] when it
+runs on the thread that called hle_mark_main_thread, and keeps
+hle_in_shim_main at the import that thread is in (-1 in lifted code), so a
+sampling thread can tell game code from time spent in the runtime.
+hle_shim_total/hle_shim_name_at name the slots; hle_mono_ns is the clock for
+longer spans.
+
+The clock read twice a call is hle_ticks: the CPU's time-stamp counter where
+it runs at a constant rate (constant_tsc and nonstop_tsc), scaled to ns by
+hle_tsc_calibrate (a host calls it at start; it waits 20 ms, and later calls
+refine the scale), CLOCK_MONOTONIC elsewhere. In Operation Flashpoint it took
+1.6 % less of the main thread than CLOCK_MONOTONIC (three runs each, same
+build), with the same times measured.
+
+Off by default. Operation Flashpoint's performance log (time per import, game
+code share, freezes) uses it.
+---
+ CHANGELOG.md                 |  9 ++++++
+ runtime/win32hle/host_lite.c | 58 ++++++++++++++++++++++++++++++++++++
+ runtime/win32hle/win32hle.h  | 16 ++++++++++
+ 3 files changed, 83 insertions(+)
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index b4eaae4..005aecb 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -14,6 +14,15 @@ versions follow [SemVer](https://semver.org/).
+   shadowed.
+ 
+ ### Added
++- win32hle: per-import timing for a host's profiler. With `hle_shim_timing`
++  set, each import's inclusive time on the thread that called
++  `hle_mark_main_thread` adds up in `hle_shim_ns_main[]` (names from
++  `hle_shim_name_at`), and `hle_in_shim_main` tells a sampling thread which
++  import that thread is in (-1: lifted code). Off by default (the clock is
++  read twice a call). The clock is `hle_ticks`: the CPU's time-stamp counter
++  where it runs at a constant rate (scaled to ns by `hle_tsc_calibrate`, which
++  a host calls at start), CLOCK_MONOTONIC otherwise. Operation Flashpoint's
++  performance log is built on it.
+ - pe: `pdb2_ref.py` reads a Visual C++ 5/6 PDB (MSF 2.00, `_ST` symbol
+   records), which llvm-pdbutil and `pdb_ref.py` cannot, into the same
+   reference JSON, plus a `--seed-functions` list for disasm32. No external
+diff --git a/runtime/win32hle/host_lite.c b/runtime/win32hle/host_lite.c
+index 4afaf0f..fd5df43 100644
+--- a/runtime/win32hle/host_lite.c
++++ b/runtime/win32hle/host_lite.c
+@@ -20,6 +20,7 @@
+ #include <string.h>
+ #include <pthread.h>
+ #include <sched.h>
++#include <time.h>
+ #include "win32hle.h"
+ 
+ /* ------------------------------------------------------------ register file
+@@ -238,12 +239,69 @@ static uint32_t g_last_import_va;
+  * entered through shim_entry: the lookup and the call are back to back on the
+  * thread that holds the machine, so the index passes through a global. */
+ static volatile uint32_t g_pending_shim;
++/* Per-import time (inclusive: a shim that runs guest callbacks counts them)
++ * on the thread that called hle_mark_main_thread (the game's main loop, so a
++ * worker blocked in a wait does not hide what the loop does), and the import
++ * that thread runs now (-1: guest code), for a host's performance log. Off
++ * until hle_shim_timing is set: the clock (hle_ticks) is read twice a call. */
++int hle_shim_timing;
++uint64_t hle_shim_ns_main[MAX_SHIMS];
++volatile int hle_in_shim_main = -1;
++static __thread int t_is_main;
++void hle_mark_main_thread(void) { t_is_main = 1; }
++int hle_shim_total(void) { return g_shim_n; }
++const char *hle_shim_name_at(int i) { return i >= 0 && i < g_shim_n ? g_shim[i].name : NULL; }
++uint64_t hle_mono_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec; }
++/* A cheaper clock for short spans: the CPU's time-stamp counter, a few cycles
++ * to read where CLOCK_MONOTONIC takes tens of ns, scaled to ns by
++ * hle_tsc_calibrate. Until that finds a constant-rate counter, ticks are ns
++ * from CLOCK_MONOTONIC. */
++static volatile uint64_t g_tsc_mul;              /* ns per tick, 32.32 fixed point; 0: no counter */
++#if (defined(__x86_64__) || defined(__i386__)) && !defined(__EMSCRIPTEN__)
++#include <x86intrin.h>
++uint64_t hle_ticks(void) { return g_tsc_mul ? __rdtsc() : hle_mono_ns(); }
++void hle_tsc_calibrate(void) {
++    static uint64_t tsc0, ns0;
++    static int ok = -1;
++    if (ok < 0) {
++        char line[4096]; ok = 0;
++        FILE *f = fopen("/proc/cpuinfo", "r");
++        while (f && fgets(line, sizeof line, f))
++            if (!strncmp(line, "flags", 5)) { ok = strstr(line, " constant_tsc") && strstr(line, " nonstop_tsc"); break; }
++        if (f) fclose(f);
++        if (!ok) return;
++        tsc0 = __rdtsc(), ns0 = hle_mono_ns();
++        struct timespec d = { 0, 20000000 };    /* 20 ms: 1e-4 at worst; later calls refine it */
++        nanosleep(&d, NULL);
++    }
++    if (!ok) return;
++    uint64_t t = __rdtsc(), n = hle_mono_ns();
++    if (t > tsc0 && n > ns0) g_tsc_mul = (uint64_t)((double)(n - ns0) / (double)(t - tsc0) * 4294967296.0);
++}
++#else
++uint64_t hle_ticks(void) { return hle_mono_ns(); }
++void hle_tsc_calibrate(void) {}
++#endif
++uint64_t hle_ticks_ns(uint64_t d) {
++    uint64_t m = g_tsc_mul;
++#if defined(__SIZEOF_INT128__)
++    return m ? (uint64_t)(((unsigned __int128)d * m) >> 32) : d;
++#else
++    return m ? (d >> 32) * m + (((d & 0xFFFFFFFFu) * m) >> 32) : d;
++#endif
++}
+ static void shim_entry(void) {
+     uint32_t i = g_pending_shim;
+     if (g_waiters) hle_yield();
+     g_last_import_va = g_shim[i].va;                     /* again: the thread that ran meanwhile set its own */
+     g_cur_import = g_shim[i].name;
++    if (!(hle_shim_timing && t_is_main)) { g_shim[i].fn(); return; }
++    int outer = hle_in_shim_main;
++    hle_in_shim_main = (int)i;
++    uint64_t t0 = hle_ticks();
+     g_shim[i].fn();
++    hle_shim_ns_main[i] += hle_ticks_ns(hle_ticks() - t0);
++    hle_in_shim_main = outer;
+ }
+ recomp_func_t recomp_lookup_import(uint32_t va) {
+     if (va < SHIM_BASE || va >= SHIM_BASE + SHIM_STEP * (uint32_t)g_shim_n) return NULL;
+diff --git a/runtime/win32hle/win32hle.h b/runtime/win32hle/win32hle.h
+index 091a61e..65df24b 100644
+--- a/runtime/win32hle/win32hle.h
++++ b/runtime/win32hle/win32hle.h
+@@ -123,6 +123,22 @@ uint32_t hle_resolve_or_stub(const char *name);
+ 
+ /* Human name for a synthetic shim VA (for traces/faults), or NULL. */
+ const char *hle_name(uint32_t va);
++/* Per-import time spent (ns) on the main thread (hle_mark_main_thread),
++ * indexed like registration order, once hle_shim_timing is set;
++ * hle_in_shim_main is the import that thread runs now, -1 in guest code. */
++extern int hle_shim_timing;
++extern uint64_t hle_shim_ns_main[];
++extern volatile int hle_in_shim_main;
++int hle_shim_total(void);
++const char *hle_shim_name_at(int i);
++void hle_mark_main_thread(void);
++uint64_t hle_mono_ns(void);                      /* CLOCK_MONOTONIC in ns */
++/* short spans, cheaply: hle_ticks_ns(hle_ticks() - t0) is ns. A host calls
++ * hle_tsc_calibrate once at start (it waits 20 ms) and may call it again (it
++ * refines the scale); before that, ticks are ns. */
++uint64_t hle_ticks(void);
++uint64_t hle_ticks_ns(uint64_t ticks);
++void hle_tsc_calibrate(void);
+ 
+ /* ---- native -> guest ----
+  * Run a lifted function (window proc, dialog proc, thread start, timer) from
+-- 
+2.43.0
+

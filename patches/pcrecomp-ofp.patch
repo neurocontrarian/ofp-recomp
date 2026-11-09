@@ -1,0 +1,981 @@
+diff --git a/runtime/recomp32/recomp_types.h b/runtime/recomp32/recomp_types.h
+index d827cad..2f97a74 100644
+--- a/runtime/recomp32/recomp_types.h
++++ b/runtime/recomp32/recomp_types.h
+@@ -111,13 +111,36 @@ extern const uint32_t recomp_dispatch_count;
+ #define esi l_esi
+ #define edi l_edi
+ #define ebp l_ebp
+-#define RECOMP_REGS_LOCALS uint32_t l_eax = g_eax, l_ecx = g_ecx, l_edx = g_edx, l_ebx = g_ebx, l_esp = g_esp, l_esi = g_esi, l_edi = g_edi, l_ebp = g_ebp;
+-#define RECOMP_REGS_OUT() (g_eax = l_eax, g_ecx = l_ecx, g_edx = l_edx, g_ebx = l_ebx, g_esp = l_esp, g_esi = l_esi, g_edi = l_edi, g_ebp = l_ebp)
++#ifdef RECOMP_X87_LOCAL
++/* RECOMP_X87_LOCAL (with RECOMP_X87_RING): the top of the x87 stack in locals.
++ * The values a function pushes stay in _xs[0.._xk-1] (st0 is _xs[_xk-1]);
++ * what lies below -- the caller's values, a float a callee returned -- stays
++ * on the global ring. Every call, tail call and return writes the locals out
++ * to the ring first (RECOMP_X87_FLUSH, in RECOMP_REGS_OUT), so callees, float
++ * returns and __ftol see the stack as before. _xk changes by constants only,
++ * so the optimiser knows it at each instruction and keeps the values in host
++ * registers; where paths disagree it is a runtime index, still correct. The
++ * ring's stores, which any guest memory write may alias, were what made the
++ * float code slow. */
++#define RECOMP_X87_LOCALS double _xs[8]; int64_t _xsi[8]; int _xk = 0;
++#define RECOMP_X87_FLUSH() ({ for (int _xj = 0; _xj < _xk; _xj++) fp_push_ring(_xs[_xj], _xsi[_xj]); _xk = 0; })
++#define RECOMP_X87_CLEAR() (_xk = 0)       /* a caught throw: the stack is the ring's */
++#else
++#define RECOMP_X87_LOCALS
++#define RECOMP_X87_FLUSH() ((void)0)
++#define RECOMP_X87_CLEAR() ((void)0)
++#endif
++#define RECOMP_REGS_LOCALS uint32_t l_eax = g_eax, l_ecx = g_ecx, l_edx = g_edx, l_ebx = g_ebx, l_esp = g_esp, l_esi = g_esi, l_edi = g_edi, l_ebp = g_ebp; RECOMP_X87_LOCALS
++/* the registers back to the globals: RECOMP_REGS_OUT also hands over the x87 values (every exit and call) */
++#define RECOMP_REGS_OUT_ONLY() (g_eax = l_eax, g_ecx = l_ecx, g_edx = l_edx, g_ebx = l_ebx, g_esp = l_esp, g_esi = l_esi, g_edi = l_edi, g_ebp = l_ebp)
++#define RECOMP_REGS_OUT() (RECOMP_X87_FLUSH(), RECOMP_REGS_OUT_ONLY())
+ #define RECOMP_REGS_IN() (l_eax = g_eax, l_ecx = g_ecx, l_edx = g_edx, l_ebx = g_ebx, l_esp = g_esp, l_esi = g_esi, l_edi = g_edi, l_ebp = g_ebp)
+ #else
+ #define RECOMP_REGS_LOCALS
+ #define RECOMP_REGS_OUT() ((void)0)
++#define RECOMP_REGS_OUT_ONLY() ((void)0)
+ #define RECOMP_REGS_IN() ((void)0)
++#define RECOMP_X87_CLEAR() ((void)0)
+ #endif
+ 
+ #if defined(RECOMP_GENERATED_CODE) && !defined(RECOMP_LOCAL_REGS)
+@@ -132,7 +155,11 @@ extern const uint32_t recomp_dispatch_count;
+ #endif
+ #ifdef RECOMP_GENERATED_CODE
+ /* x87 FPU stack is global; _fpu_cmp stays per-function (set+used within one fn) */
++#ifdef RECOMP_X87_RING
++#define _st g_stp                 /* st(i) is g_stp[i]: see fp_push_ring */
++#else
+ #define _st g_st
++#endif
+ #define _fp_top g_fp_top
+ #define _fpu_cw g_fpu_cw
+ /* MMX file is global too. The lifter emits _mm[n] (see lift32.MMX_REGS), so the
+@@ -986,7 +1013,33 @@ static inline uint32_t sse_cmp_pred(double a, double b, int p) {
+ #else
+ #define RECOMP_SHARED_DATA __attribute__((weak))
+ #endif
++#ifdef RECOMP_X87_RING
++/* The x87 stack as a pointer into a long buffer, as the FPU's TOP is: a push
++ * moves it down one, a pop up one, st(i) is g_stp[i]. The eight-register
++ * shuffle of fp_push_impl (sixteen moves a push or pop, through globals the
++ * compiler cannot keep in registers) was most of the cost of x87-heavy lifted
++ * code. The pointer is moved back to the middle (the eight live values with
++ * it) when it nears an end. Host: g_stbuf/g_sti64buf/g_stp/g_sti64p and
++ * recomp_x87_recentre (win32hle host_lite.c). */
++#define X87_RING 4096
++extern double  g_stbuf[X87_RING], *g_stp;
++extern int64_t g_sti64buf[X87_RING], *g_sti64p;
++void recomp_x87_recentre(void);
++#define g_st_i64 g_sti64p
++static inline void fp_push_ring(double val, int64_t shadow) {
++    if (__builtin_expect(g_stp == g_stbuf, 0)) recomp_x87_recentre();
++    --g_stp, --g_sti64p;
++    g_stp[0] = val, g_sti64p[0] = shadow;
++}
++static inline double fp_pop_ring(void) {
++    double v = g_stp[0];
++    ++g_stp, ++g_sti64p;
++    if (__builtin_expect(g_stp >= g_stbuf + X87_RING - 8, 0)) recomp_x87_recentre();
++    return v;
++}
++#else
+ RECOMP_SHARED_DATA int64_t g_st_i64[8] = {0};
++#endif
+ 
+ static inline void fp_push_impl(double* st, int* top, double val) {
+     /* Shift stack down, push new value */
+@@ -1005,15 +1058,32 @@ static inline double fp_pop_impl(double* st, int* top) {
+     return val;
+ }
+ 
++#if defined(RECOMP_X87_LOCAL) && defined(RECOMP_GENERATED_CODE) && defined(RECOMP_LOCAL_REGS)
++/* st(i) and its shadow: a local while the function pushed it, else the ring */
++#define _ST(i)  (*((_xk - 1 - (i)) >= 0 ? &_xs[_xk - 1 - (i)] : &g_stp[(i) - _xk]))
++#define _STI(i) (*((_xk - 1 - (i)) >= 0 ? &_xsi[_xk - 1 - (i)] : &g_sti64p[(i) - _xk]))
++/* (eight locals at most: a ninth push hands them to the ring first) */
++#define fp_push(val) do { double _pv_ = (val); if (_xk >= 8) RECOMP_X87_FLUSH(); \
++    _xs[_xk] = _pv_, _xsi[_xk] = 0, _xk++; } while (0)
++#define fp_pop()     (_xk > 0 ? _xs[--_xk] : fp_pop_ring())
++#elif defined(RECOMP_X87_RING)
++#define _ST(i)  _st[i]
++#define _STI(i) g_st_i64[i]
++#define fp_push(val) fp_push_ring((val), 0)
++#define fp_pop()     fp_pop_ring()
++#else
++#define _ST(i)  _st[i]
++#define _STI(i) g_st_i64[i]
+ #define fp_push(val) fp_push_impl(_st, &_fp_top, (val))
+ #define fp_pop()     fp_pop_impl(_st, &_fp_top)
++#endif
+ 
+ /* fild qword: push with the exact value shadowed. */
+ #define fp_push_i64(v) do { int64_t _pv = (int64_t)(v); \
+-    fp_push((double)_pv); g_st_i64[0] = _pv; } while (0)
++    fp_push((double)_pv); _STI(0) = _pv; } while (0)
+ /* fxch st(i), keeping each slot's shadow with its value. */
+-#define fp_xch(i) do { double _t = _st[0]; _st[0] = _st[i]; _st[i] = _t; \
+-    int64_t _ti = g_st_i64[0]; g_st_i64[0] = g_st_i64[i]; g_st_i64[i] = _ti; } while (0)
++#define fp_xch(i) do { double _t = _ST(0); _ST(0) = _ST(i); _ST(i) = _t; \
++    int64_t _ti = _STI(0); _STI(0) = _STI(i); _STI(i) = _ti; } while (0)
+ 
+ /* fist/fistp round by the control word's RC field (bits 10-11), not by C's
+  * truncating cast. MSVC's __ftol sets chop before its fistp, so a plain cast
+@@ -1133,7 +1203,23 @@ extern uint32_t g_icall_count;
+ /* Lookup functions */
+ recomp_func_t recomp_lookup(uint32_t va);          /* binary search in dispatch table */
+ recomp_func_t recomp_lookup_manual(uint32_t va);    /* manual overrides */
++/* manual, then the dispatch table, then the imports, through a cache: an
++ * indirect call (a C++ virtual call) is otherwise a binary search */
++recomp_func_t recomp_resolve(uint32_t va);
+ recomp_func_t recomp_lookup_import(uint32_t va);    /* import bridges */
++/* an import bridge's VA: what it resolves to depends on more than the VA (a
++ * shared entry that reads which import was asked), so it is never cached */
++int recomp_is_import_va(uint32_t va);
++#if defined(__GNUC__) && !defined(RECOMP_NO_WEAK_RESOLVE)
++/* defaults for hosts without them (win32hle's host_lite.c has its own, with a
++ * cache): the plain lookup order, and no import VA known */
++__attribute__((weak)) recomp_func_t recomp_resolve(uint32_t va) {
++    recomp_func_t f = recomp_lookup_manual(va);
++    if (!f) f = recomp_lookup(va);
++    return f ? f : recomp_lookup_import(va);
++}
++__attribute__((weak)) int recomp_is_import_va(uint32_t va) { (void)va; return 0; }
++#endif
+ 
+ /* The dummy return address pushed before a recompiled call. The callee's lifted
+  * `ret` pops it. 0xDEAD0000 is a recognizable marker, but if a stack imbalance
+@@ -1153,6 +1239,44 @@ recomp_func_t recomp_lookup_import(uint32_t va);    /* import bridges */
+  * function whose first `je` tests the helper's ZF (Bunghole in One's ball
+  * never moved). */
+ 
++/* The indirect-call trace ring (above): two stores and two counters a call,
++ * millions a second in a game. RECOMP_NO_ICALL_TRACE leaves it out (a crash
++ * report then has no ring). */
++#ifdef RECOMP_NO_ICALL_TRACE
++#define RECOMP_ICALL_TRACE(va) ((void)0)
++#else
++#define RECOMP_ICALL_TRACE(va) do { \
++    g_icall_trace[g_icall_trace_idx & (ICALL_TRACE_SIZE-1)] = (va); \
++    g_icall_from[g_icall_trace_idx & (ICALL_TRACE_SIZE-1)] = g_cur_func; \
++    g_icall_trace_idx++; \
++    g_icall_count++; \
++} while (0)
++#endif
++
++/* RECOMP_ICALL_SITE_CACHE: each indirect call site keeps the last target it
++ * resolved (most sites always call the same one), so the common case is a
++ * compare instead of a call into recomp_resolve (imports excepted: see
++ * recomp_is_import_va). One 64-bit word a site, read
++ * and written whole: the guest VA, and the host function as an offset from
++ * recomp_resolve (one executable: it fits 32 bits). */
++#ifdef RECOMP_ICALL_SITE_CACHE
++#define RECOMP_RESOLVE_SITE(va) ({ \
++    static uint64_t _sc; \
++    uint64_t _e = _sc; \
++    recomp_func_t _rf; \
++    if (_e && (uint32_t)(_e >> 32) == (va)) \
++        _rf = (recomp_func_t)((uintptr_t)recomp_resolve + (uintptr_t)(intptr_t)(int32_t)(uint32_t)_e); \
++    else { \
++        _rf = recomp_resolve(va); \
++        intptr_t _o = _rf ? (intptr_t)_rf - (intptr_t)recomp_resolve : 0; \
++        if (_rf && _o == (intptr_t)(int32_t)_o && !recomp_is_import_va(va)) \
++            _sc = ((uint64_t)(va) << 32) | (uint32_t)(int32_t)_o; \
++    } \
++    _rf; })
++#else
++#define RECOMP_RESOLVE_SITE(va) recomp_resolve(va)
++#endif
++
+ /* Direct call to a known recompiled function */
+ #define RECOMP_CALL(func) do { \
+     uint32_t _caller = g_cur_func; \
+@@ -1167,13 +1291,8 @@ recomp_func_t recomp_lookup_import(uint32_t va);    /* import bridges */
+ /* Indirect call through dispatch */
+ #define RECOMP_ICALL(target_va) do { \
+     uint32_t _va = (uint32_t)(target_va); \
+-    g_icall_trace[g_icall_trace_idx & (ICALL_TRACE_SIZE-1)] = _va; \
+-    g_icall_from[g_icall_trace_idx & (ICALL_TRACE_SIZE-1)] = g_cur_func; \
+-    g_icall_trace_idx++; \
+-    g_icall_count++; \
+-    recomp_func_t _fn = recomp_lookup_manual(_va); \
+-    if (!_fn) _fn = recomp_lookup(_va); \
+-    if (!_fn) _fn = recomp_lookup_import(_va); \
++    RECOMP_ICALL_TRACE(_va); \
++    recomp_func_t _fn = RECOMP_RESOLVE_SITE(_va); \
+     if (_fn) { \
+         uint32_t _caller = g_cur_func; \
+         PUSH32(esp, RECOMP_RETADDR); \
+@@ -1195,13 +1314,8 @@ recomp_func_t recomp_lookup_import(uint32_t va);    /* import bridges */
+ /* Indirect tail call (jmp through dispatch) */
+ #define RECOMP_ITAIL(target_va) do { \
+     uint32_t _va = (uint32_t)(target_va); \
+-    g_icall_trace[g_icall_trace_idx & (ICALL_TRACE_SIZE-1)] = _va; \
+-    g_icall_from[g_icall_trace_idx & (ICALL_TRACE_SIZE-1)] = g_cur_func; \
+-    g_icall_trace_idx++; \
+-    g_icall_count++; \
+-    recomp_func_t _fn = recomp_lookup_manual(_va); \
+-    if (!_fn) _fn = recomp_lookup(_va); \
+-    if (!_fn) _fn = recomp_lookup_import(_va); \
++    RECOMP_ICALL_TRACE(_va); \
++    recomp_func_t _fn = RECOMP_RESOLVE_SITE(_va); \
+     if (_fn) { RECOMP_FLAGS_OUT(); RECOMP_REGS_OUT(); _fn(); RECOMP_REGS_IN(); } \
+     else if (_va == RECOMP_RETADDR) { /* setjmp and friends return by jumping \
+         to the saved return address; that is a return, not a missing target. */ } \
+@@ -1259,7 +1373,7 @@ void recomp_eh_resume(recomp_ehframe_t* f, uint32_t resume);
+     _ehf.entry_esp = g_esp;                                                   \
+     _ehf.func = g_cur_func;                                                   \
+     recomp_eh_push(&_ehf);                                                    \
+-    if (setjmp(_ehf.jb)) { RECOMP_REGS_IN(); _flag_k = FK_NONE;               \
++    if (setjmp(_ehf.jb)) { RECOMP_REGS_IN(); _flag_k = FK_NONE; RECOMP_X87_CLEAR(); \
+                            _itail_tgt = _ehf.resume; goto _ljump; }
+ #define RECOMP_EH_LEAVE() recomp_eh_pop(&_ehf)
+ /* A backward branch in lifted code: a loop. Every RECOMP_YIELD_EVERY of them,
+@@ -1279,7 +1393,7 @@ RECOMP_WEAK uint32_t g_backedges;
+ #define RECOMP_BACKEDGE() do { \
+     if (++g_backedges >= RECOMP_YIELD_EVERY && recomp_yield_hook) { \
+         g_backedges = 0; \
+-        RECOMP_REGS_OUT(); recomp_yield_hook(); RECOMP_REGS_IN(); \
++        RECOMP_REGS_OUT_ONLY(); recomp_yield_hook(); RECOMP_REGS_IN(); \
+     } } while (0)
+ 
+ /* Always-callable trace dump (no-op unless RECOMP_TRACE). */
+diff --git a/runtime/win32hle/dsound.c b/runtime/win32hle/dsound.c
+index 8880749..9bd053d 100644
+--- a/runtime/win32hle/dsound.c
++++ b/runtime/win32hle/dsound.c
+@@ -45,7 +45,12 @@ typedef struct {
+     double pos;                 /* the play cursor, in frames */
+     int volume, pan;            /* hundredths of a dB; -10000..10000 */
+     float gl, gr;
++    /* DirectSound 3D (a DSBCAPS_CTRL3D buffer): where it is, as a listener hears it */
++    int is3d, mode3d;           /* DS3DMODE_NORMAL 0, HEADRELATIVE 1, DISABLE 2 */
++    float p3d[3], mind, maxd;
+ } dsbuf;
++/* the one listener (IDirectSound3DListener on the primary buffer) */
++static struct { float pos[3], front[3], top[3], rolloff, distf; } g_lis = { { 0, 0, 0 }, { 0, 0, 1 }, { 0, 1, 0 }, 1, 1 };
+ 
+ static pthread_mutex_t g_mix = PTHREAD_MUTEX_INITIALIZER;
+ #define MAX_BUFS 256
+@@ -58,6 +63,23 @@ void hle_dsound_set_master(float gain) { g_master = gain; }
+ static void gains(dsbuf *b) {
+     float v = b->volume <= -10000 ? 0.0f : powf(10.0f, (float)b->volume / 2000.0f);
+     float l = 1.0f, r = 1.0f;
++    if (b->is3d && b->mode3d != 2) {
++        /* inverse distance past the minimum, held at the maximum; panned
++         * by the side the sound is on (DirectSound is left-handed: right =
++         * top x front) */
++        float rel[3];
++        for (int k = 0; k < 3; k++) rel[k] = b->mode3d == 1 ? b->p3d[k] : b->p3d[k] - g_lis.pos[k];
++        float d = sqrtf(rel[0] * rel[0] + rel[1] * rel[1] + rel[2] * rel[2]);
++        float mind = b->mind > 0 ? b->mind : 1.0f, maxd = b->maxd > mind ? b->maxd : 1e9f;
++        float dd = d < mind ? mind : d > maxd ? maxd : d;
++        float att = mind / (mind + g_lis.rolloff * (dd - mind));
++        const float *f = g_lis.front, *t = g_lis.top;
++        float right[3] = { t[1] * f[2] - t[2] * f[1], t[2] * f[0] - t[0] * f[2], t[0] * f[1] - t[1] * f[0] };
++        float rn = sqrtf(right[0] * right[0] + right[1] * right[1] + right[2] * right[2]);
++        float side = d > 1e-4f && rn > 1e-6f ? (rel[0] * right[0] + rel[1] * right[1] + rel[2] * right[2]) / (d * rn) : 0.0f;
++        v *= att;
++        l = side > 0 ? 1.0f - 0.7f * side : 1.0f, r = side < 0 ? 1.0f + 0.7f * side : 1.0f;
++    }
+     if (b->pan < 0) r = b->pan <= -10000 ? 0.0f : powf(10.0f, (float)b->pan / 2000.0f);
+     if (b->pan > 0) l = b->pan >= 10000 ? 0.0f : powf(10.0f, (float)-b->pan / 2000.0f);
+     b->gl = v * l, b->gr = v * r;
+@@ -417,6 +439,154 @@ static void b_Stop(void) {
+ }
+ static void b_Restore(void) { RET(DS_OK, 1); }
+ 
++/* ---- DirectSound 8 and 3D ---- */
++static uint32_t g_vt_3db, g_vt_lis, g_lis_obj;
++static float fa(int i) { uint32_t v = A32(i); float f; memcpy(&f, &v, 4); return f; }
++static void all3d_gains(void) { for (int i = 0; i < MAX_BUFS; i++) if (g_buf[i] && g_buf[i]->is3d) gains(g_buf[i]); }
++static void b_QueryInterface(void) {                     /* (this, iid, &out) */
++    uint32_t self = A32(0), d1 = A32(1) ? MEM32(A32(1)) : 0, out = A32(2);
++    dsbuf *b = buf_of(self);
++    if (d1 == 0x279AFA86u && b) {                        /* IID_IDirectSound3DBuffer */
++        uint32_t o = hle_com_new(g_vt_3db, 12);
++        SLOT(o) = SLOT(self);
++        pthread_mutex_lock(&g_mix);
++        if (!b->is3d) b->is3d = 1, b->mind = 1.0f, b->maxd = 1e9f, gains(b);
++        pthread_mutex_unlock(&g_mix);
++        if (out) MEM32(out) = o;
++        RET(DS_OK, 3);
++    }
++    if (d1 == 0x279AFA84u) {                             /* IID_IDirectSound3DListener */
++        if (!g_lis_obj) g_lis_obj = hle_com_new(g_vt_lis, 12);
++        MEM32(g_lis_obj + 4)++;
++        if (out) MEM32(out) = g_lis_obj;
++        RET(DS_OK, 3);
++    }
++    if (out) MEM32(out) = self;
++    MEM32(self + 4)++;
++    RET(DS_OK, 3);
++}
++static void b8_SetFX(void) { RET(0x8878001Eu, 4); }      /* DSERR_CONTROLUNAVAIL */
++static void b8_AcquireResources(void) { RET(DS_OK, 4); }
++static void b8_GetObjectInPath(void) { if (A32(4)) MEM32(A32(4)) = 0; RET(0x88780FFFu, 5); }
++static void d8_VerifyCertification(void) { if (A32(1)) MEM32(A32(1)) = 0; RET(DS_OK, 2); }
++
++static void t_SetPosition(void) {                        /* (this, x, y, z, apply) */
++    dsbuf *b = buf_of(A32(0));
++    if (b) { pthread_mutex_lock(&g_mix); b->p3d[0] = fa(1), b->p3d[1] = fa(2), b->p3d[2] = fa(3); gains(b); pthread_mutex_unlock(&g_mix); }
++    RET(DS_OK, 5);
++}
++static void t_GetPosition(void) {
++    dsbuf *b = buf_of(A32(0));
++    if (b && A32(1)) memcpy(hle_ptr(A32(1)), b->p3d, 12);
++    RET(DS_OK, 2);
++}
++static void t_SetMinDistance(void) { dsbuf *b = buf_of(A32(0)); if (b) { pthread_mutex_lock(&g_mix); b->mind = fa(1); gains(b); pthread_mutex_unlock(&g_mix); } RET(DS_OK, 3); }
++static void t_SetMaxDistance(void) { dsbuf *b = buf_of(A32(0)); if (b) { pthread_mutex_lock(&g_mix); b->maxd = fa(1); gains(b); pthread_mutex_unlock(&g_mix); } RET(DS_OK, 3); }
++static void t_GetMinDistance(void) { dsbuf *b = buf_of(A32(0)); if (b && A32(1)) memcpy(hle_ptr(A32(1)), &b->mind, 4); RET(DS_OK, 2); }
++static void t_GetMaxDistance(void) { dsbuf *b = buf_of(A32(0)); if (b && A32(1)) memcpy(hle_ptr(A32(1)), &b->maxd, 4); RET(DS_OK, 2); }
++static void t_SetMode(void) { dsbuf *b = buf_of(A32(0)); if (b) { pthread_mutex_lock(&g_mix); b->mode3d = (int)A32(1); gains(b); pthread_mutex_unlock(&g_mix); } RET(DS_OK, 3); }
++static void t_GetMode(void) { dsbuf *b = buf_of(A32(0)); if (b && A32(1)) MEM32(A32(1)) = (uint32_t)b->mode3d; RET(DS_OK, 2); }
++static void t_SetAllParameters(void) {                   /* (this, DS3DBUFFER*, apply) */
++    dsbuf *b = buf_of(A32(0));
++    uint32_t p = A32(1);
++    if (b && p) {
++        pthread_mutex_lock(&g_mix);
++        memcpy(b->p3d, hle_ptr(p + 4), 12);
++        memcpy(&b->mind, hle_ptr(p + 52), 4), memcpy(&b->maxd, hle_ptr(p + 56), 4);
++        b->mode3d = (int)MEM32(p + 60);
++        gains(b);
++        pthread_mutex_unlock(&g_mix);
++    }
++    RET(DS_OK, 3);
++}
++static void t_GetAllParameters(void) {
++    dsbuf *b = buf_of(A32(0));
++    uint32_t p = A32(1);
++    if (b && p) {
++        memset(hle_ptr(p + 4), 0, 60);
++        memcpy(hle_ptr(p + 4), b->p3d, 12);
++        MEM32(p + 28) = MEM32(p + 32) = 360;
++        MEM32(p + 44) = 0; memcpy(hle_ptr(p + 52), &b->mind, 4), memcpy(hle_ptr(p + 56), &b->maxd, 4);
++        MEM32(p + 60) = (uint32_t)b->mode3d;
++    }
++    RET(DS_OK, 2);
++}
++static void t_ok2(void) { RET(DS_OK, 3); }
++static void t_ok3(void) { RET(DS_OK, 4); }
++static void t_ok4(void) { RET(DS_OK, 5); }
++static void t_zero1(void) { if (A32(1)) MEM32(A32(1)) = 0; RET(DS_OK, 2); }
++static void t_zero2(void) { if (A32(1)) MEM32(A32(1)) = 0; if (A32(2)) MEM32(A32(2)) = 0; RET(DS_OK, 3); }
++static void l_SetPosition(void) { pthread_mutex_lock(&g_mix); g_lis.pos[0] = fa(1), g_lis.pos[1] = fa(2), g_lis.pos[2] = fa(3); all3d_gains(); pthread_mutex_unlock(&g_mix); RET(DS_OK, 5); }
++static void l_GetPosition(void) { if (A32(1)) memcpy(hle_ptr(A32(1)), g_lis.pos, 12); RET(DS_OK, 2); }
++static void l_SetOrientation(void) {                     /* (this, fx, fy, fz, tx, ty, tz, apply) */
++    pthread_mutex_lock(&g_mix);
++    for (int k = 0; k < 3; k++) g_lis.front[k] = fa(1 + k), g_lis.top[k] = fa(4 + k);
++    all3d_gains();
++    pthread_mutex_unlock(&g_mix);
++    RET(DS_OK, 8);
++}
++static void l_GetOrientation(void) {
++    if (A32(1)) memcpy(hle_ptr(A32(1)), g_lis.front, 12);
++    if (A32(2)) memcpy(hle_ptr(A32(2)), g_lis.top, 12);
++    RET(DS_OK, 3);
++}
++static void l_SetRolloffFactor(void) { pthread_mutex_lock(&g_mix); g_lis.rolloff = fa(1); all3d_gains(); pthread_mutex_unlock(&g_mix); RET(DS_OK, 3); }
++static void l_GetRolloffFactor(void) { if (A32(1)) memcpy(hle_ptr(A32(1)), &g_lis.rolloff, 4); RET(DS_OK, 2); }
++static void l_SetDistanceFactor(void) { g_lis.distf = fa(1); RET(DS_OK, 3); }
++static void l_GetDistanceFactor(void) { if (A32(1)) memcpy(hle_ptr(A32(1)), &g_lis.distf, 4); RET(DS_OK, 2); }
++static void l_SetAllParameters(void) {                   /* (this, DS3DLISTENER*, apply) */
++    uint32_t p = A32(1);
++    if (p) {
++        pthread_mutex_lock(&g_mix);
++        memcpy(g_lis.pos, hle_ptr(p + 4), 12);
++        memcpy(g_lis.front, hle_ptr(p + 28), 12), memcpy(g_lis.top, hle_ptr(p + 40), 12);
++        memcpy(&g_lis.distf, hle_ptr(p + 52), 4), memcpy(&g_lis.rolloff, hle_ptr(p + 56), 4);
++        all3d_gains();
++        pthread_mutex_unlock(&g_mix);
++    }
++    RET(DS_OK, 3);
++}
++static void l_GetAllParameters(void) {
++    uint32_t p = A32(1);
++    if (p) {
++        memset(hle_ptr(p + 4), 0, 60);
++        memcpy(hle_ptr(p + 4), g_lis.pos, 12);
++        memcpy(hle_ptr(p + 28), g_lis.front, 12), memcpy(hle_ptr(p + 40), g_lis.top, 12);
++        memcpy(hle_ptr(p + 52), &g_lis.distf, 4), memcpy(hle_ptr(p + 56), &g_lis.rolloff, 4);
++        float one = 1.0f; memcpy(hle_ptr(p + 60), &one, 4);
++    }
++    RET(DS_OK, 2);
++}
++static void l_Commit(void) { RET(DS_OK, 1); }
++static void vtables3d(void) {
++    if (g_vt_3db) return;
++    static const win32hle_shim t[] = {
++        { "IDirectSound3DBuffer::QueryInterface", hle_com_QueryInterface }, { "IDirectSound3DBuffer::AddRef", hle_com_AddRef },
++        { "IDirectSound3DBuffer::Release", hle_com_Release }, { "IDirectSound3DBuffer::GetAllParameters", t_GetAllParameters },
++        { "IDirectSound3DBuffer::GetConeAngles", t_zero2 }, { "IDirectSound3DBuffer::GetConeOrientation", t_zero1 },
++        { "IDirectSound3DBuffer::GetConeOutsideVolume", t_zero1 }, { "IDirectSound3DBuffer::GetMaxDistance", t_GetMaxDistance },
++        { "IDirectSound3DBuffer::GetMinDistance", t_GetMinDistance }, { "IDirectSound3DBuffer::GetMode", t_GetMode },
++        { "IDirectSound3DBuffer::GetPosition", t_GetPosition }, { "IDirectSound3DBuffer::GetVelocity", t_zero1 },
++        { "IDirectSound3DBuffer::SetAllParameters", t_SetAllParameters }, { "IDirectSound3DBuffer::SetConeAngles", t_ok3 },
++        { "IDirectSound3DBuffer::SetConeOrientation", t_ok4 }, { "IDirectSound3DBuffer::SetConeOutsideVolume", t_ok2 },
++        { "IDirectSound3DBuffer::SetMaxDistance", t_SetMaxDistance }, { "IDirectSound3DBuffer::SetMinDistance", t_SetMinDistance },
++        { "IDirectSound3DBuffer::SetMode", t_SetMode }, { "IDirectSound3DBuffer::SetPosition", t_SetPosition },
++        { "IDirectSound3DBuffer::SetVelocity", t_ok4 }, { 0, 0 } };
++    static const win32hle_shim l[] = {
++        { "IDirectSound3DListener::QueryInterface", hle_com_QueryInterface }, { "IDirectSound3DListener::AddRef", hle_com_AddRef },
++        { "IDirectSound3DListener::Release", hle_com_Release }, { "IDirectSound3DListener::GetAllParameters", l_GetAllParameters },
++        { "IDirectSound3DListener::GetDistanceFactor", l_GetDistanceFactor },
++        { "IDirectSound3DListener::GetDopplerFactor", t_zero1 }, { "IDirectSound3DListener::GetOrientation", l_GetOrientation },
++        { "IDirectSound3DListener::GetPosition", l_GetPosition }, { "IDirectSound3DListener::GetRolloffFactor", l_GetRolloffFactor },
++        { "IDirectSound3DListener::GetVelocity", t_zero1 }, { "IDirectSound3DListener::SetAllParameters", l_SetAllParameters },
++        { "IDirectSound3DListener::SetDistanceFactor", l_SetDistanceFactor },
++        { "IDirectSound3DListener::SetDopplerFactor", t_ok2 }, { "IDirectSound3DListener::SetOrientation", l_SetOrientation },
++        { "IDirectSound3DListener::SetPosition", l_SetPosition }, { "IDirectSound3DListener::SetRolloffFactor", l_SetRolloffFactor },
++        { "IDirectSound3DListener::SetVelocity", t_ok4 }, { "IDirectSound3DListener::CommitDeferredSettings", l_Commit }, { 0, 0 } };
++    g_vt_3db = hle_com_vtable(t);
++    g_vt_lis = hle_com_vtable(l);
++}
++
+ /* ---- IDirectSound ---- */
+ static void d_Release(void) {
+     uint32_t self = A32(0), n = --MEM32(self + 4);
+@@ -490,9 +660,10 @@ static void vtables(void) {
+         { "IDirectSound::GetCaps", d_GetCaps }, { "IDirectSound::DuplicateSoundBuffer", d_DuplicateSoundBuffer },
+         { "IDirectSound::SetCooperativeLevel", d_SetCooperativeLevel }, { "IDirectSound::Compact", d_Compact },
+         { "IDirectSound::GetSpeakerConfig", d_GetSpeakerConfig }, { "IDirectSound::SetSpeakerConfig", d_SetSpeakerConfig },
+-        { "IDirectSound::Initialize", d_Initialize }, { 0, 0 } };
++        { "IDirectSound::Initialize", d_Initialize },
++        { "IDirectSound8::VerifyCertification", d8_VerifyCertification }, { 0, 0 } };
+     static const win32hle_shim buf[] = {
+-        { "IDirectSoundBuffer::QueryInterface", hle_com_QueryInterface }, { "IDirectSoundBuffer::AddRef", hle_com_AddRef },
++        { "IDirectSoundBuffer::QueryInterface", b_QueryInterface }, { "IDirectSoundBuffer::AddRef", hle_com_AddRef },
+         { "IDirectSoundBuffer::Release", b_Release }, { "IDirectSoundBuffer::GetCaps", b_GetCaps },
+         { "IDirectSoundBuffer::GetCurrentPosition", b_GetCurrentPosition }, { "IDirectSoundBuffer::GetFormat", b_GetFormat },
+         { "IDirectSoundBuffer::GetVolume", b_GetVolume }, { "IDirectSoundBuffer::GetPan", b_GetPan },
+@@ -502,9 +673,12 @@ static void vtables(void) {
+         { "IDirectSoundBuffer::SetFormat", b_SetFormat }, { "IDirectSoundBuffer::SetVolume", b_SetVolume },
+         { "IDirectSoundBuffer::SetPan", b_SetPan }, { "IDirectSoundBuffer::SetFrequency", b_SetFrequency },
+         { "IDirectSoundBuffer::Stop", b_Stop }, { "IDirectSoundBuffer::Unlock", b_Unlock },
+-        { "IDirectSoundBuffer::Restore", b_Restore }, { 0, 0 } };
++        { "IDirectSoundBuffer::Restore", b_Restore },
++        { "IDirectSoundBuffer8::SetFX", b8_SetFX }, { "IDirectSoundBuffer8::AcquireResources", b8_AcquireResources },
++        { "IDirectSoundBuffer8::GetObjectInPath", b8_GetObjectInPath }, { 0, 0 } };
+     g_vt_ds = hle_com_vtable(ds);
+     g_vt_buf = hle_com_vtable(buf);
++    vtables3d();
+ }
+ 
+ static void s_DirectSoundCreate(void) {                  /* (guid, &out, outer) */
+@@ -535,10 +709,14 @@ void hle_dsound_register_com(void) {
+     static const uint8_t CLSID_DirectSound[16] = { 0x46, 0xD9, 0xD4, 0x47, 0xE8, 0x62, 0xCF, 0x11,
+                                                    0x93, 0xBC, 0x44, 0x45, 0x53, 0x54, 0x00, 0x00 };
+     hle_com_register_class(CLSID_DirectSound, ds_create);
++    static const uint8_t CLSID_DirectSound8[16] = { 0x3F, 0xCC, 0x01, 0x39, 0xB5, 0x84, 0xA4, 0x4F,
++                                                    0xBA, 0x35, 0xAA, 0x81, 0x72, 0xB8, 0xA0, 0x9B };
++    hle_com_register_class(CLSID_DirectSound8, ds_create);
+ }
+ 
+ const win32hle_shim win32hle_dsound[] = {
+     { "dsound.dll#1", s_DirectSoundCreate }, { "DirectSoundCreate", s_DirectSoundCreate },
+     { "dsound.dll#2", s_DirectSoundEnumerateA }, { "DirectSoundEnumerateA", s_DirectSoundEnumerateA },
++    { "dsound.dll#11", s_DirectSoundCreate }, { "DirectSoundCreate8", s_DirectSoundCreate },
+     { 0, 0 }
+ };
+diff --git a/runtime/win32hle/guest_mem.c b/runtime/win32hle/guest_mem.c
+index ea99921..fb5e250 100644
+--- a/runtime/win32hle/guest_mem.c
++++ b/runtime/win32hle/guest_mem.c
+@@ -34,6 +34,10 @@
+ #define MAGIC 0x48454150u    /* 'HEAP' */
+ #define GRAN  0x10000u       /* the reservation unit */
+ 
++/* out of guest memory: a host's log may want to know (flat: the 32-bit space
++ * is small; based: the guest's 4 GB) */
++void (*hle_on_alloc_fail)(const char *what, uint32_t n);
++
+ #ifdef HLE_FLAT
+ /* ================================================================ flat */
+ 
+@@ -102,7 +106,7 @@ void hle_mem_init(void) {}
+ uint32_t hle_vm_reserve(uint32_t va, uint32_t size) {
+     void *p = mmap(va ? (void *)(uintptr_t)(va & ~0xFFFFu) : NULL, size, PROT_READ | PROT_WRITE,
+                    MAP_PRIVATE | MAP_ANONYMOUS | (va ? MAP_FIXED_NOREPLACE : 0), -1, 0);
+-    if (p == MAP_FAILED) return 0;
++    if (p == MAP_FAILED) { if (hle_on_alloc_fail && !va) hle_on_alloc_fail("pages", size); return 0; }
+     if (va && (uint32_t)(uintptr_t)p != (va & ~0xFFFFu)) { munmap(p, size); return 0; }
+     return (uint32_t)(uintptr_t)p;
+ }
+@@ -112,7 +116,7 @@ void hle_vm_zero(uint32_t va, uint32_t size)    { madvise((void *)(uintptr_t)va,
+ 
+ void *hle_heap_alloc(uint32_t n, int zero) {
+     uint8_t *p = (uint8_t *)(zero ? calloc(1, (size_t)n + HDR) : malloc((size_t)n + HDR));
+-    if (!p) return NULL;
++    if (!p) { if (hle_on_alloc_fail) hle_on_alloc_fail("heap", n); return NULL; }
+     ((uint32_t *)p)[0] = n, ((uint32_t *)p)[1] = MAGIC;
+     return p + HDR;
+ }
+@@ -126,7 +130,7 @@ void *hle_heap_realloc(void *u, uint32_t n, int zero) {
+     if (!u) return hle_heap_alloc(n, zero);
+     uint32_t old = hle_heap_size(u);
+     uint8_t *p = (uint8_t *)realloc((uint8_t *)u - HDR, (size_t)n + HDR);
+-    if (!p) return NULL;
++    if (!p) { if (hle_on_alloc_fail) hle_on_alloc_fail("heap grow", n); return NULL; }
+     ((uint32_t *)p)[0] = n;
+     if (zero && n > old) memset(p + HDR + old, 0, n - old);
+     return p + HDR;
+@@ -137,7 +141,7 @@ void *hle_heap_realloc(void *u, uint32_t n, int zero) {
+ 
+ #define SPAN      0x100000000ull       /* the guest's whole 32-bit space */
+ #define ANY_LO    0x10000000u          /* "anywhere" starts above the images */
+-#define ANY_HI    0x7F000000u          /* under GetSystemInfo's highest application address */
++#define ANY_HI    hle_vm_any_hi        /* under GetSystemInfo's highest application address */
+ #define SHIM_LO   0x7F000000u          /* host_lite.c's synthetic import VAs: never mapped */
+ #define SHIM_HI   0x80000000u
+ #define MAX_RANGES 8192
+@@ -199,6 +203,10 @@ static void add_range(uint64_t lo, uint64_t hi) {
+     g_nrng++;
+ }
+ 
++/* Where "anywhere" reservations stop: under 2 GB, as for a Windows program
++ * that is not large-address-aware. A host may raise it (up to 0xFFF00000:
++ * the 4 GB a large-address-aware program gets on a 64-bit Windows). */
++uint32_t hle_vm_any_hi = 0x7F000000u;
+ /* First fit above ANY_LO, past the shim range. */
+ static uint32_t find_gap(uint32_t size) {
+     uint64_t at = ANY_LO;
+@@ -313,7 +321,7 @@ void *hle_heap_alloc(uint32_t n, int zero) {
+     pthread_mutex_lock(&g_mem_lock);
+     va = c >= 0 ? small_alloc(c) : vm_reserve_locked(0, total);
+     pthread_mutex_unlock(&g_mem_lock);
+-    if (!va) return NULL;
++    if (!va) { if (hle_on_alloc_fail) hle_on_alloc_fail("heap", n); return NULL; }
+     uint32_t *h = (uint32_t *)host(va);
+     h[0] = n, h[1] = MAGIC, h[2] = c >= 0 ? (uint32_t)c : LARGE, h[3] = 0;
+     if (zero) memset(h + 4, 0, n);
+diff --git a/runtime/win32hle/host_lite.c b/runtime/win32hle/host_lite.c
+index 4afaf0f..0f7151d 100644
+--- a/runtime/win32hle/host_lite.c
++++ b/runtime/win32hle/host_lite.c
+@@ -12,6 +12,7 @@
+  * adds image mapping and IAT binding on top; those are separate.
+  */
+ #define _GNU_SOURCE
++#define RECOMP_NO_WEAK_RESOLVE   /* recomp_resolve and recomp_is_import_va are defined here */
+ #include <stdint.h>
+ #include <stddef.h>
+ #include <stdio.h>
+@@ -20,6 +21,7 @@
+ #include <string.h>
+ #include <pthread.h>
+ #include <sched.h>
++#include <time.h>
+ #include "win32hle.h"
+ 
+ /* ------------------------------------------------------------ register file
+@@ -28,6 +30,21 @@
+ uint32_t  g_eax, g_ecx, g_edx, g_esp, g_ebx, g_esi, g_edi, g_ebp;
+ double    g_st[8];
+ int       g_fp_top;
++#ifdef RECOMP_X87_RING
++/* the x87 stack, a pointer into a long buffer (recomp_types.h fp_push_ring) */
++double   g_stbuf[X87_RING], *g_stp = g_stbuf + X87_RING / 2;
++int64_t  g_sti64buf[X87_RING], *g_sti64p = g_sti64buf + X87_RING / 2;
++void recomp_x87_recentre(void) {
++    double v[8];
++    int64_t w[8];
++    memcpy(v, g_stp, sizeof v), memcpy(w, g_sti64p, sizeof w);
++    g_stp = g_stbuf + X87_RING / 2, g_sti64p = g_sti64buf + X87_RING / 2;
++    memcpy(g_stp, v, sizeof v), memcpy(g_sti64p, w, sizeof w);
++}
++#define X87_TOP g_stp                   /* st(0..7), saved and loaded with a thread */
++#else
++#define X87_TOP g_st
++#endif
+ uint16_t  g_fpu_cw = 0x027F;
+ uint16_t  g_seg_cs, g_seg_ds, g_seg_es, g_seg_fs, g_seg_gs, g_seg_ss;
+ uint64_t  g_mm[8];
+@@ -101,14 +118,14 @@ static void regs_save(regs_t *r) {
+     r->eax=g_eax; r->ecx=g_ecx; r->edx=g_edx; r->esp=g_esp;
+     r->ebx=g_ebx; r->esi=g_esi; r->edi=g_edi; r->ebp=g_ebp;
+     r->fs=g_fs_base; r->cur=g_cur_func;
+-    memcpy(r->st, g_st, sizeof g_st); r->fp_top=g_fp_top; r->fpu_cw=g_fpu_cw;
++    memcpy(r->st, X87_TOP, sizeof r->st); r->fp_top=g_fp_top; r->fpu_cw=g_fpu_cw;
+     memcpy(r->mm, g_mm, sizeof g_mm);
+ }
+ static void regs_load(const regs_t *r) {
+     g_eax=r->eax; g_ecx=r->ecx; g_edx=r->edx; g_esp=r->esp;
+     g_ebx=r->ebx; g_esi=r->esi; g_edi=r->edi; g_ebp=r->ebp;
+     g_fs_base=r->fs; g_cur_func=r->cur;
+-    memcpy(g_st, r->st, sizeof g_st); g_fp_top=r->fp_top; g_fpu_cw=r->fpu_cw;
++    memcpy(X87_TOP, r->st, sizeof r->st); g_fp_top=r->fp_top; g_fpu_cw=r->fpu_cw;
+     memcpy(g_mm, r->mm, sizeof g_mm);
+ }
+ 
+@@ -200,6 +217,26 @@ recomp_func_t recomp_lookup(uint32_t va) {
+     return NULL;
+ }
+ recomp_func_t recomp_lookup_manual(uint32_t va) { (void)va; return NULL; }
++/* Indirect calls: a direct-mapped cache in front of the lifted functions'
++ * lookups (only lifted code, holding the machine, calls it; the answers never
++ * change). An import is looked up each time: that lookup names the shim about
++ * to run (g_pending_shim). */
++#define RESOLVE_CACHE 16384
++static struct { uint32_t va; recomp_func_t fn; } g_resolve[RESOLVE_CACHE];
++int recomp_is_import_va(uint32_t va);
++recomp_func_t recomp_lookup_import(uint32_t va);
++recomp_func_t recomp_resolve(uint32_t va) {
++    /* an import (a COM method of a host DLL: thousands of calls a frame) is
++     * never cached, as its lookup names the shim about to run: first, before
++     * the search of the lifted functions, which cannot hold it */
++    if (recomp_is_import_va(va)) return recomp_lookup_import(va);
++    uint32_t h = (va ^ (va >> 14)) & (RESOLVE_CACHE - 1);
++    if (g_resolve[h].va == va && g_resolve[h].fn) return g_resolve[h].fn;
++    recomp_func_t f = recomp_lookup_manual(va);
++    if (!f) f = recomp_lookup(va);
++    if (f) g_resolve[h].va = va, g_resolve[h].fn = f;
++    return f;
++}
+ 
+ /* --------------------------------------------------------- shim registry
+  * Each shim gets a synthetic VA in a reserved range that no real image uses. */
+@@ -238,15 +275,85 @@ static uint32_t g_last_import_va;
+  * entered through shim_entry: the lookup and the call are back to back on the
+  * thread that holds the machine, so the index passes through a global. */
+ static volatile uint32_t g_pending_shim;
++/* Per-import time (inclusive: a shim that runs guest callbacks counts them)
++ * on the thread that called hle_mark_main_thread (the game's main loop, so a
++ * worker blocked in a wait does not hide what the loop does), and the import
++ * that thread runs now (-1: guest code), for a host's performance log. Off
++ * until hle_shim_timing is set: the clock is read twice a call (hle_ticks). */
++int hle_shim_timing;
++uint64_t hle_shim_ns_main[MAX_SHIMS];
++uint64_t hle_shim_ns_outer;                     /* the same, outermost imports only: no double count */
++/* the main thread's CPU cycles in outermost imports, when the host gives a
++ * cheap cycle reader (rdpmc): with its own total, the cycles of guest code */
++uint64_t (*hle_cycles_fn)(void);
++uint64_t hle_shim_cyc_outer;
++volatile int hle_in_shim_main = -1;
++static __thread int t_is_main;
++void hle_mark_main_thread(void) { t_is_main = 1; }
++int hle_shim_total(void) { return g_shim_n; }
++const char *hle_shim_name_at(int i) { return i >= 0 && i < g_shim_n ? g_shim[i].name : NULL; }
++uint64_t hle_mono_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec; }
++/* A cheaper clock for short spans: the CPU's time-stamp counter, a few cycles
++ * to read where CLOCK_MONOTONIC takes tens of ns, scaled to ns by
++ * hle_tsc_calibrate. Until that finds a constant-rate counter, ticks are ns
++ * from CLOCK_MONOTONIC. */
++static volatile uint64_t g_tsc_mul;              /* ns per tick, 32.32 fixed point; 0: no counter */
++#if defined(__x86_64__) || defined(__i386__)
++#include <x86intrin.h>
++uint64_t hle_ticks(void) { return g_tsc_mul ? __rdtsc() : hle_mono_ns(); }
++void hle_tsc_calibrate(void) {
++    static uint64_t tsc0, ns0;
++    static int ok = -1;
++    if (ok < 0) {
++        char line[4096]; ok = 0;
++        FILE *f = fopen("/proc/cpuinfo", "r");
++        while (f && fgets(line, sizeof line, f))
++            if (!strncmp(line, "flags", 5)) { ok = strstr(line, " constant_tsc") && strstr(line, " nonstop_tsc"); break; }
++        if (f) fclose(f);
++        if (!ok) return;
++        tsc0 = __rdtsc(), ns0 = hle_mono_ns();
++        struct timespec d = { 0, 20000000 };    /* 20 ms: 1e-4 at worst; later calls refine it */
++        nanosleep(&d, NULL);
++    }
++    if (!ok) return;
++    uint64_t t = __rdtsc(), n = hle_mono_ns();
++    if (t > tsc0 && n > ns0) g_tsc_mul = (uint64_t)((double)(n - ns0) / (double)(t - tsc0) * 4294967296.0);
++}
++#else
++uint64_t hle_ticks(void) { return hle_mono_ns(); }
++void hle_tsc_calibrate(void) {}
++#endif
++uint64_t hle_ticks_ns(uint64_t d) {
++    uint64_t m = g_tsc_mul;
++#if defined(__SIZEOF_INT128__)
++    return m ? (uint64_t)(((unsigned __int128)d * m) >> 32) : d;
++#else
++    return m ? (d >> 32) * m + (((d & 0xFFFFFFFFu) * m) >> 32) : d;
++#endif
++}
+ static void shim_entry(void) {
+     uint32_t i = g_pending_shim;
+     if (g_waiters) hle_yield();
+     g_last_import_va = g_shim[i].va;                     /* again: the thread that ran meanwhile set its own */
+     g_cur_import = g_shim[i].name;
++    if (!(hle_shim_timing && t_is_main)) { g_shim[i].fn(); return; }
++    int outer = hle_in_shim_main;
++    hle_in_shim_main = (int)i;
++    uint64_t c0 = outer < 0 && hle_cycles_fn ? hle_cycles_fn() : 0;
++    uint64_t t0 = hle_ticks();
+     g_shim[i].fn();
++    uint64_t d = hle_ticks_ns(hle_ticks() - t0);
++    hle_shim_ns_main[i] += d;
++    if (outer < 0) {
++        hle_shim_ns_outer += d;
++        uint64_t c1 = c0 ? hle_cycles_fn() : 0;
++        if (c1 > c0) hle_shim_cyc_outer += c1 - c0;
++    }
++    hle_in_shim_main = outer;
+ }
++int recomp_is_import_va(uint32_t va) { return va >= SHIM_BASE && va < SHIM_BASE + SHIM_STEP * (uint32_t)g_shim_n; }
+ recomp_func_t recomp_lookup_import(uint32_t va) {
+-    if (va < SHIM_BASE || va >= SHIM_BASE + SHIM_STEP * (uint32_t)g_shim_n) return NULL;
++    if (!recomp_is_import_va(va)) return NULL;
+     uint32_t i = (va - SHIM_BASE) / SHIM_STEP;
+     if (i < (uint32_t)g_shim_n && g_shim[i].va == va) {
+         g_last_import_va = va;
+diff --git a/runtime/win32hle/kernel32.c b/runtime/win32hle/kernel32.c
+index c4cd821..bb8c129 100644
+--- a/runtime/win32hle/kernel32.c
++++ b/runtime/win32hle/kernel32.c
+@@ -236,6 +236,11 @@ static void k_VirtualFree(void) {                        /* (addr, size, type) *
+     int i = region_of(addr);
+     if (i < 0) { g_last_error = ERROR_INVALID_PARAMETER; RET(0, 3); }
+     if (type & MEM_RELEASE) {
++        /* as Windows: only a whole reservation, by its base and size 0. A
++         * release of a block inside one (a game freeing a chunk it
++         * committed in its own pool) fails there and must fail here, or
++         * the whole pool goes with it. */
++        if (addr != g_region[i].base || size) { g_last_error = ERROR_INVALID_PARAMETER; RET(0, 3); }
+         hle_vm_release(g_region[i].base, g_region[i].size);
+         g_region[i].size = 0;
+     } else if (type & MEM_DECOMMIT) {
+@@ -445,9 +450,14 @@ static int try_take(uint32_t h) {
+     }
+ }
+ 
++/* A handle closed while a thread waits on it (a game that signals its
++ * worker's event, then closes it and frees the worker's object, as at exit):
++ * on Windows the wait holds the object and wakes signalled; here the closed
++ * handle is seen on a later poll, so it counts as signalled then. Invalid on
++ * the first poll is invalid. */
+ uint32_t hle_wait(int n, const uint32_t *h, int all, uint32_t timeout) {
+     uint32_t start = ticks_ms();
+-    for (;;) {
++    for (int first = 1;; first = 0) {
+         if (all) {
+             int ready = 1;
+             for (int i = 0; i < n; i++) { int r = try_take(h[i]); if (r < 0) return WAIT_FAILED; if (!r) { ready = 0; break; } }
+@@ -455,7 +465,7 @@ uint32_t hle_wait(int n, const uint32_t *h, int all, uint32_t timeout) {
+         } else {
+             for (int i = 0; i < n; i++) {
+                 int r = try_take(h[i]);
+-                if (r < 0) { g_last_error = ERROR_INVALID_HANDLE; return WAIT_FAILED; }
++                if (r < 0 && first) { g_last_error = ERROR_INVALID_HANDLE; return WAIT_FAILED; }
+                 if (r) return WAIT_OBJECT_0 + (uint32_t)i;
+             }
+         }
+diff --git a/runtime/win32hle/module.c b/runtime/win32hle/module.c
+index 8baf43e..bd5c893 100644
+--- a/runtime/win32hle/module.c
++++ b/runtime/win32hle/module.c
+@@ -39,6 +39,7 @@ static const char *const g_system[] = {
+     "kernel32", "user32", "gdi32", "advapi32", "shell32", "ole32", "oleaut32", "winmm",
+     "wsock32", "ws2_32", "ddraw", "dsound", "dinput", "version", "comctl32", "comdlg32",
+     "ntdll", "msvcrt", "imm32", "mpr", "rpcrt4", "uuid", "dplayx", "d3dim",
++    "d3d8", "dinput8", "ijl15", "ifc22",                 /* a host answers them (Operation Flashpoint) */
+ };
+ 
+ static void base_of(const char *path, char *out, size_t n) {
+diff --git a/runtime/win32hle/screen.c b/runtime/win32hle/screen.c
+index 87981d6..bdb0e93 100644
+--- a/runtime/win32hle/screen.c
++++ b/runtime/win32hle/screen.c
+@@ -23,6 +23,7 @@
+ #include <pthread.h>
+ #include <SDL2/SDL.h>
+ #include <SDL2/SDL_ttf.h>
++#include <SDL2/SDL_vulkan.h>
+ #include "win32hle.h"
+ #ifdef __EMSCRIPTEN__
+ #include <emscripten.h>
+@@ -45,6 +46,17 @@ static unsigned g_shown_seq = ~0u;
+ static uint32_t g_last_present;
+ static int g_headless, g_fullscreen;
+ static SDL_Rect g_dst;                                   /* where the picture is in the window */
++/* GL mode (hle_screen_gl set before hle_screen_open): the window is made for
++ * OpenGL (1) or Vulkan (2) and has no SDL renderer; a host's 3D layer (a Direct3D 8 on GL) draws
++ * into it and says where its picture is (hle_screen_gl_picture), so the
++ * mouse maps as it does onto a scaled DirectDraw frame. */
++int hle_screen_gl;
++SDL_Window *hle_screen_sdl_window(void) { return g_win; }
++static int g_src_w, g_src_h;                            /* the picture last shown: what the window maps to */
++void hle_screen_gl_picture(int src_w, int src_h, int x, int y, int w, int h) {
++    g_src_w = src_w, g_src_h = src_h;
++    g_dst.x = x, g_dst.y = y, g_dst.w = w, g_dst.h = h;
++}
+ static pthread_t g_video_thread;                         /* SDL's video calls stay on the thread that opened it */
+ static SDL_Texture *g_pre, *g_small;                     /* sharp's integer prescale; the bars' blur */
+ static int g_pre_w, g_pre_h;
+@@ -171,7 +183,6 @@ static uint32_t scan_of(SDL_Scancode s) {
+ }
+ 
+ /* window points -> game pixels, clamped to the picture */
+-static int g_src_w, g_src_h;                            /* the picture last shown: what the window maps to */
+ static void to_game(int x, int y, int *gx, int *gy) {
+     int w = g_src_w, h = g_src_h, bpp, pw, ph, ww, wh;
+     if (w <= 0 || h <= 0) hle_dd_mode(&w, &h, &bpp);
+@@ -180,6 +191,12 @@ static void to_game(int x, int y, int *gx, int *gy) {
+         SDL_GetWindowSize(g_win, &ww, &wh);
+         if (ww > 0 && wh > 0) x = x * pw / ww, y = y * ph / wh;
+     }
++    else if (hle_screen_gl && g_win) {                  /* GL mode: the drawable counts pixels */
++        if (hle_screen_gl == 2) SDL_Vulkan_GetDrawableSize(g_win, &pw, &ph);
++        else SDL_GL_GetDrawableSize(g_win, &pw, &ph);
++        SDL_GetWindowSize(g_win, &ww, &wh);
++        if (ww > 0 && wh > 0) x = x * pw / ww, y = y * ph / wh;
++    }
+     if (g_dst.w <= 0 || g_dst.h <= 0) { *gx = x, *gy = y; return; }
+     *gx = (int)((long long)(x - g_dst.x) * w / g_dst.w);
+     *gy = (int)((long long)(y - g_dst.y) * h / g_dst.h);
+@@ -769,8 +786,17 @@ int hle_screen_open(const char *title, int fullscreen, int headless) {
+     SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, "1");      /* SIGINT and SIGTERM end the process: SDL would make them a close the game can refuse */
+     if (SDL_InitSubSystem(SDL_INIT_VIDEO) != 0) { fprintf(stderr, "[screen] SDL: %s\n", SDL_GetError()); return -1; }
+     g_win = SDL_CreateWindow(title, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1280, 960,
+-                             SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI | (fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0));
++                             SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI | (fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0)
++                             | (hle_screen_gl == 2 ? SDL_WINDOW_VULKAN : hle_screen_gl ? SDL_WINDOW_OPENGL : 0));
+     if (!g_win) { fprintf(stderr, "[screen] window: %s\n", SDL_GetError()); return -1; }
++    if (hle_screen_gl) {                                 /* the host's GL layer draws; no SDL renderer */
++        SDL_ShowCursor(SDL_DISABLE);
++        hle_cursor_hook = warp;
++        g_video_thread = pthread_self();
++        fprintf(stderr, "[screen] %s, %s window (the host draws), fullscreen F11\n", SDL_GetCurrentVideoDriver(),
++                hle_screen_gl == 2 ? "Vulkan" : "OpenGL");
++        return 0;
++    }
+ #ifdef __EMSCRIPTEN__
+     /* In a browser the game runs on a worker thread and the canvas belongs
+      * to the page's: SDL's GL renderer would need the WebGL context made
+diff --git a/runtime/win32hle/win32hle.h b/runtime/win32hle/win32hle.h
+index 091a61e..7d6bf6e 100644
+--- a/runtime/win32hle/win32hle.h
++++ b/runtime/win32hle/win32hle.h
+@@ -123,6 +123,28 @@ uint32_t hle_resolve_or_stub(const char *name);
+ 
+ /* Human name for a synthetic shim VA (for traces/faults), or NULL. */
+ const char *hle_name(uint32_t va);
++/* Per-import time spent (ns) on the main thread (hle_mark_main_thread),
++ * indexed like registration order, once hle_shim_timing is set;
++ * hle_in_shim_main is the import that thread runs now, -1 in guest code. */
++extern int hle_shim_timing;
++extern uint64_t hle_shim_ns_main[];
++extern uint64_t hle_shim_ns_outer;
++extern uint64_t (*hle_cycles_fn)(void);
++extern uint64_t hle_shim_cyc_outer;
++extern volatile int hle_in_shim_main;
++int hle_shim_total(void);
++const char *hle_shim_name_at(int i);
++void hle_mark_main_thread(void);
++uint64_t hle_mono_ns(void);                      /* CLOCK_MONOTONIC in ns */
++/* short spans, cheaply: hle_ticks_ns(hle_ticks() - t0) is ns. A host calls
++ * hle_tsc_calibrate once at start (it waits 20 ms) and may call it again (it
++ * refines the scale); before that, ticks are ns. */
++uint64_t hle_ticks(void);
++uint64_t hle_ticks_ns(uint64_t ticks);
++void hle_tsc_calibrate(void);
++/* called when guest memory runs out (the heap or pages) */
++extern void (*hle_on_alloc_fail)(const char *what, uint32_t n);
++extern uint32_t hle_vm_any_hi;                  /* based hosts: where "anywhere" guest reservations stop (0x7F000000) */
+ 
+ /* ---- native -> guest ----
+  * Run a lifted function (window proc, dialog proc, thread start, timer) from
+@@ -277,6 +299,7 @@ extern const win32hle_shim win32hle_user32[];
+ extern const win32hle_shim win32hle_winmm[];
+ extern const win32hle_shim win32hle_lz32[];          /* LZOpenFileA & co: SZDD expanded in memory (lz32.c) */
+ extern const win32hle_shim win32hle_wsock32[];        /* by name and by ordinal */
++extern void (*hle_ws_broadcast_hook)(int fd, const void *buf, uint32_t len, unsigned port);   /* after a guest's broadcast sendto */
+ void hle_ws_poll(void);                                /* the pump: WSAAsyncSelect notifications */
+ extern const win32hle_shim win32hle_ole32[];          /* OLE32 + OLEAUT32 */
+ extern const win32hle_shim win32hle_storage[];        /* structured storage: compound files */
+diff --git a/runtime/win32hle/wsock32.c b/runtime/win32hle/wsock32.c
+index 4a58127..116ed67 100644
+--- a/runtime/win32hle/wsock32.c
++++ b/runtime/win32hle/wsock32.c
+@@ -154,6 +154,9 @@ static void w_connect(void) {
+ }
+ static void w_listen(void) { if (listen(fd_of(A32(0)), (int)A32(1)) != 0) FAIL(2); RET(0, 2); }
+ static int nettrace(void) { static int on = -1; if (on < 0) on = getenv("HLE_NETTRACE") != NULL; return on; }
++/* a datagram the guest broadcast (255.255.255.255), for a host that also
++ * sends it elsewhere (game servers on the Internet that answer a LAN search) */
++void (*hle_ws_broadcast_hook)(int fd, const void *buf, uint32_t len, unsigned port);
+ static void w_sendto(void) {                             /* (s, buf, len, flags, to, tolen) */
+     struct sockaddr_in a;
+     ssize_t n;
+@@ -162,6 +165,8 @@ static void w_sendto(void) {                             /* (s, buf, len, flags,
+         else to_host((const uint8_t *)APTR(4), &a);
+         n = sendto(fd_of(A32(0)), APTR(1), A32(2), MSG_NOSIGNAL, (struct sockaddr *)&a, sizeof a);
+         if (nettrace()) fprintf(stderr, "[net] sendto %s:%u %u bytes -> %d%s\n", inet_ntoa(a.sin_addr), ntohs(a.sin_port), A32(2), (int)n, n < 0 ? strerror(errno) : "");
++        if (n >= 0 && hle_ws_broadcast_hook && !is_ipx(fd_of(A32(0))) && a.sin_addr.s_addr == htonl(INADDR_BROADCAST))
++            hle_ws_broadcast_hook(fd_of(A32(0)), APTR(1), A32(2), ntohs(a.sin_port));
+     }
+     else n = send(fd_of(A32(0)), APTR(1), A32(2), MSG_NOSIGNAL);
+     if (n < 0) FAIL(6);
+@@ -355,6 +360,44 @@ static void w_EnumProtocolsA(void) {
+     RET(1, 3);
+ }
+ 
++/* select(nfds, read, write, except, timeout): Winsock's fd_set is a count and
++ * an array of up to 64 SOCKETs (not a bitmap), timeval two 32-bit longs, a
++ * NULL timeout waits for ever. Done with poll(); each set is rewritten to hold
++ * only its ready sockets, and the total is returned. A wait gives the
++ * machine to the other guest threads. */
++static void w_select(void) {
++    uint32_t set[3] = { A32(1), A32(2), A32(3) }, tv = A32(4);
++    struct pollfd pf[192];
++    int which[192], n = 0;
++    for (int k = 0; k < 3; k++) {
++        if (!set[k]) continue;
++        uint32_t cnt = MEM32(set[k]);
++        if (cnt > 64) cnt = 64;
++        for (uint32_t i = 0; i < cnt; i++) {
++            int fd = fd_of(MEM32(set[k] + 4 + 4 * i));
++            if (fd < 0) { g_wsa_error = WSAENOTSOCK; RET(SOCKET_ERROR, 5); }
++            pf[n].fd = fd, pf[n].revents = 0;
++            pf[n].events = k == 0 ? POLLIN : k == 1 ? POLLOUT : POLLPRI;
++            which[n++] = k;
++        }
++    }
++    int ms = tv ? (int)(MEM32(tv) * 1000u + MEM32(tv + 4) / 1000u) : -1;
++    if (ms) hle_block_begin();
++    int r = poll(pf, (nfds_t)n, ms);
++    if (ms) hle_block_end();
++    if (r < 0) FAIL(5);
++    uint32_t total = 0, out[3] = { 0, 0, 0 };
++    for (int j = 0; j < n; j++) {
++        short ev = pf[j].revents;
++        int k = which[j];
++        int ready = k == 0 ? (ev & (POLLIN | POLLHUP | POLLERR)) != 0
++                  : k == 1 ? (ev & (POLLOUT | POLLERR)) != 0 : (ev & (POLLPRI | POLLERR)) != 0;
++        if (ready) MEM32(set[k] + 4 + 4 * out[k]++) = (uint32_t)pf[j].fd + SOCK_BASE, total++;
++    }
++    for (int k = 0; k < 3; k++) if (set[k]) MEM32(set[k]) = out[k];
++    RET(total, 5);
++}
++
+ #define SHIM2(ord, name, fn) { "wsock32.dll#" #ord, fn }, { name, fn }
+ const win32hle_shim win32hle_wsock32[] = {
+     SHIM2(1111, "EnumProtocolsA", w_EnumProtocolsA),
+@@ -373,6 +416,7 @@ const win32hle_shim win32hle_wsock32[] = {
+     SHIM2(15, "ntohs", w_ntohs),
+     SHIM2(16, "recv", w_recv),
+     SHIM2(17, "recvfrom", w_recvfrom),
++    SHIM2(18, "select", w_select),
+     SHIM2(19, "send", w_send),
+     SHIM2(20, "sendto", w_sendto),
+     SHIM2(21, "setsockopt", w_setsockopt),
+diff --git a/tools/lift/generate.py b/tools/lift/generate.py
+index 1250be4..3ab69a8 100644
+--- a/tools/lift/generate.py
++++ b/tools/lift/generate.py
+@@ -428,6 +428,10 @@ def lift_function_linear(lifter, name, instructions, leaders, func_start,
+     lines.append(f'    {leave}RECOMP_REGS_OUT();')
+     lines.append('}')
+     out = re.sub(r'\breturn;', '{ %sRECOMP_REGS_OUT(); return; }' % leave, '\n'.join(lines))
++    # x87 slots through _ST(i)/_STI(i) (recomp_types.h): the ring's st(i),
++    # or under RECOMP_X87_LOCAL a local while the function pushed it
++    out = re.sub(r'(?<![\w])_st\[(\d+)\]', r'_ST(\1)', out)
++    out = re.sub(r'(?<![\w])g_st_i64\[(\d+)\]', r'_STI(\1)', out)
+     return re.sub(r'CMP_(\w+)\(_fpu_cmp\)',
+                   lambda m: f'((_fpu_cmp) {FPU_CMP.get(m.group(1), "==")} 0)', out)
+ 

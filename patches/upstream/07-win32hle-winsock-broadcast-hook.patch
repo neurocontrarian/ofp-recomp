@@ -1,0 +1,74 @@
+From 5db79106aa94d2829f965d4ce3dddf34a5ea6c61 Mon Sep 17 00:00:00 2001
+From: neurocontrarian <56934000+neurocontrarian@users.noreply.github.com>
+Date: Sat, 7 Nov 2026 11:39:41 -0500
+Subject: [PATCH] win32hle: a hook after a guest's UDP broadcast
+
+hle_ws_broadcast_hook(fd, buf, len, port), when set, is called after a
+successful sendto to 255.255.255.255 on a UDP socket (not IPX), with the
+host socket, so a host can send the same datagram to other addresses.
+
+Operation Flashpoint searches for LAN games by broadcast; its host also sends
+that search to the Internet servers of the community master server, and
+their answers fill the game's own server list. Tested for the list (names,
+ping, players); joining a game this way has not been tried.
+---
+ CHANGELOG.md                | 6 ++++++
+ runtime/win32hle/win32hle.h | 1 +
+ runtime/win32hle/wsock32.c  | 5 +++++
+ 3 files changed, 12 insertions(+)
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index b4eaae4..9246100 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -14,6 +14,12 @@ versions follow [SemVer](https://semver.org/).
+   shadowed.
+ 
+ ### Added
++- win32hle: `hle_ws_broadcast_hook(fd, buf, len, port)`, called after a
++  guest's UDP `sendto` to 255.255.255.255 (not IPX), so a host can send the
++  same datagram elsewhere. Operation Flashpoint's LAN search is sent this way
++  to the community's Internet servers too, whose answers fill the game's own
++  server list. Only the list (names, ping, players) has been tried; joining a
++  game this way has not.
+ - pe: `pdb2_ref.py` reads a Visual C++ 5/6 PDB (MSF 2.00, `_ST` symbol
+   records), which llvm-pdbutil and `pdb_ref.py` cannot, into the same
+   reference JSON, plus a `--seed-functions` list for disasm32. No external
+diff --git a/runtime/win32hle/win32hle.h b/runtime/win32hle/win32hle.h
+index 091a61e..e08548e 100644
+--- a/runtime/win32hle/win32hle.h
++++ b/runtime/win32hle/win32hle.h
+@@ -277,6 +277,7 @@ extern const win32hle_shim win32hle_user32[];
+ extern const win32hle_shim win32hle_winmm[];
+ extern const win32hle_shim win32hle_lz32[];          /* LZOpenFileA & co: SZDD expanded in memory (lz32.c) */
+ extern const win32hle_shim win32hle_wsock32[];        /* by name and by ordinal */
++extern void (*hle_ws_broadcast_hook)(int fd, const void *buf, uint32_t len, unsigned port);   /* after a guest's broadcast sendto */
+ void hle_ws_poll(void);                                /* the pump: WSAAsyncSelect notifications */
+ extern const win32hle_shim win32hle_ole32[];          /* OLE32 + OLEAUT32 */
+ extern const win32hle_shim win32hle_storage[];        /* structured storage: compound files */
+diff --git a/runtime/win32hle/wsock32.c b/runtime/win32hle/wsock32.c
+index 4a58127..e13fb79 100644
+--- a/runtime/win32hle/wsock32.c
++++ b/runtime/win32hle/wsock32.c
+@@ -154,6 +154,9 @@ static void w_connect(void) {
+ }
+ static void w_listen(void) { if (listen(fd_of(A32(0)), (int)A32(1)) != 0) FAIL(2); RET(0, 2); }
+ static int nettrace(void) { static int on = -1; if (on < 0) on = getenv("HLE_NETTRACE") != NULL; return on; }
++/* a datagram the guest broadcast (255.255.255.255), for a host that also
++ * sends it elsewhere (game servers on the Internet that answer a LAN search) */
++void (*hle_ws_broadcast_hook)(int fd, const void *buf, uint32_t len, unsigned port);
+ static void w_sendto(void) {                             /* (s, buf, len, flags, to, tolen) */
+     struct sockaddr_in a;
+     ssize_t n;
+@@ -162,6 +165,8 @@ static void w_sendto(void) {                             /* (s, buf, len, flags,
+         else to_host((const uint8_t *)APTR(4), &a);
+         n = sendto(fd_of(A32(0)), APTR(1), A32(2), MSG_NOSIGNAL, (struct sockaddr *)&a, sizeof a);
+         if (nettrace()) fprintf(stderr, "[net] sendto %s:%u %u bytes -> %d%s\n", inet_ntoa(a.sin_addr), ntohs(a.sin_port), A32(2), (int)n, n < 0 ? strerror(errno) : "");
++        if (n >= 0 && hle_ws_broadcast_hook && !is_ipx(fd_of(A32(0))) && a.sin_addr.s_addr == htonl(INADDR_BROADCAST))
++            hle_ws_broadcast_hook(fd_of(A32(0)), APTR(1), A32(2), ntohs(a.sin_port));
+     }
+     else n = send(fd_of(A32(0)), APTR(1), A32(2), MSG_NOSIGNAL);
+     if (n < 0) FAIL(6);
+-- 
+2.53.0
+

@@ -1,0 +1,131 @@
+From 5d2f101af25922dcc84558c51f0de2a676398b14 Mon Sep 17 00:00:00 2001
+From: neurocontrarian <56934000+neurocontrarian@users.noreply.github.com>
+Date: Sat, 7 Nov 2026 11:40:20 -0500
+Subject: [PATCH] win32hle: a window for a host's own OpenGL or Vulkan renderer
+
+hle_screen_gl, set before hle_screen_open: 1 makes the window for OpenGL, 2
+for Vulkan, without an SDL renderer; the system cursor is hidden and the
+guest's cursor moves go through hle_cursor_hook, as with a DirectDraw frame.
+The host draws into hle_screen_sdl_window() and reports where its picture
+is with hle_screen_gl_picture(src_w, src_h, x, y, w, h), so mouse positions
+map back to the game's coordinates (in drawable pixels, so high-DPI windows
+map right).
+
+Operation Flashpoint's Direct3D 8 layer, on OpenGL and on Vulkan, draws
+through it. Without hle_screen_gl nothing changes.
+---
+ CHANGELOG.md                |  7 +++++++
+ runtime/win32hle/screen.c   | 30 ++++++++++++++++++++++++++++--
+ runtime/win32hle/win32hle.h |  8 ++++++++
+ 3 files changed, 43 insertions(+), 2 deletions(-)
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index b4eaae4..0e9dfb1 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -14,6 +14,13 @@ versions follow [SemVer](https://semver.org/).
+   shadowed.
+ 
+ ### Added
++- win32hle: GL mode for a host that draws the game itself. With
++  `hle_screen_gl` set before `hle_screen_open` (1 OpenGL, 2 Vulkan), the
++  window is made for that API with no SDL renderer, the host draws into it
++  (`hle_screen_sdl_window`) and tells where its picture lies
++  (`hle_screen_gl_picture`), so the mouse maps onto the game's coordinates,
++  including on high-DPI screens. Operation Flashpoint's Direct3D 8 layer (on
++  OpenGL and on Vulkan) draws through it.
+ - pe: `pdb2_ref.py` reads a Visual C++ 5/6 PDB (MSF 2.00, `_ST` symbol
+   records), which llvm-pdbutil and `pdb_ref.py` cannot, into the same
+   reference JSON, plus a `--seed-functions` list for disasm32. No external
+diff --git a/runtime/win32hle/screen.c b/runtime/win32hle/screen.c
+index 87981d6..bdb0e93 100644
+--- a/runtime/win32hle/screen.c
++++ b/runtime/win32hle/screen.c
+@@ -23,6 +23,7 @@
+ #include <pthread.h>
+ #include <SDL2/SDL.h>
+ #include <SDL2/SDL_ttf.h>
++#include <SDL2/SDL_vulkan.h>
+ #include "win32hle.h"
+ #ifdef __EMSCRIPTEN__
+ #include <emscripten.h>
+@@ -45,6 +46,17 @@ static unsigned g_shown_seq = ~0u;
+ static uint32_t g_last_present;
+ static int g_headless, g_fullscreen;
+ static SDL_Rect g_dst;                                   /* where the picture is in the window */
++/* GL mode (hle_screen_gl set before hle_screen_open): the window is made for
++ * OpenGL (1) or Vulkan (2) and has no SDL renderer; a host's 3D layer (a Direct3D 8 on GL) draws
++ * into it and says where its picture is (hle_screen_gl_picture), so the
++ * mouse maps as it does onto a scaled DirectDraw frame. */
++int hle_screen_gl;
++SDL_Window *hle_screen_sdl_window(void) { return g_win; }
++static int g_src_w, g_src_h;                            /* the picture last shown: what the window maps to */
++void hle_screen_gl_picture(int src_w, int src_h, int x, int y, int w, int h) {
++    g_src_w = src_w, g_src_h = src_h;
++    g_dst.x = x, g_dst.y = y, g_dst.w = w, g_dst.h = h;
++}
+ static pthread_t g_video_thread;                         /* SDL's video calls stay on the thread that opened it */
+ static SDL_Texture *g_pre, *g_small;                     /* sharp's integer prescale; the bars' blur */
+ static int g_pre_w, g_pre_h;
+@@ -171,7 +183,6 @@ static uint32_t scan_of(SDL_Scancode s) {
+ }
+ 
+ /* window points -> game pixels, clamped to the picture */
+-static int g_src_w, g_src_h;                            /* the picture last shown: what the window maps to */
+ static void to_game(int x, int y, int *gx, int *gy) {
+     int w = g_src_w, h = g_src_h, bpp, pw, ph, ww, wh;
+     if (w <= 0 || h <= 0) hle_dd_mode(&w, &h, &bpp);
+@@ -180,6 +191,12 @@ static void to_game(int x, int y, int *gx, int *gy) {
+         SDL_GetWindowSize(g_win, &ww, &wh);
+         if (ww > 0 && wh > 0) x = x * pw / ww, y = y * ph / wh;
+     }
++    else if (hle_screen_gl && g_win) {                  /* GL mode: the drawable counts pixels */
++        if (hle_screen_gl == 2) SDL_Vulkan_GetDrawableSize(g_win, &pw, &ph);
++        else SDL_GL_GetDrawableSize(g_win, &pw, &ph);
++        SDL_GetWindowSize(g_win, &ww, &wh);
++        if (ww > 0 && wh > 0) x = x * pw / ww, y = y * ph / wh;
++    }
+     if (g_dst.w <= 0 || g_dst.h <= 0) { *gx = x, *gy = y; return; }
+     *gx = (int)((long long)(x - g_dst.x) * w / g_dst.w);
+     *gy = (int)((long long)(y - g_dst.y) * h / g_dst.h);
+@@ -769,8 +786,17 @@ int hle_screen_open(const char *title, int fullscreen, int headless) {
+     SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, "1");      /* SIGINT and SIGTERM end the process: SDL would make them a close the game can refuse */
+     if (SDL_InitSubSystem(SDL_INIT_VIDEO) != 0) { fprintf(stderr, "[screen] SDL: %s\n", SDL_GetError()); return -1; }
+     g_win = SDL_CreateWindow(title, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1280, 960,
+-                             SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI | (fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0));
++                             SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI | (fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0)
++                             | (hle_screen_gl == 2 ? SDL_WINDOW_VULKAN : hle_screen_gl ? SDL_WINDOW_OPENGL : 0));
+     if (!g_win) { fprintf(stderr, "[screen] window: %s\n", SDL_GetError()); return -1; }
++    if (hle_screen_gl) {                                 /* the host's GL layer draws; no SDL renderer */
++        SDL_ShowCursor(SDL_DISABLE);
++        hle_cursor_hook = warp;
++        g_video_thread = pthread_self();
++        fprintf(stderr, "[screen] %s, %s window (the host draws), fullscreen F11\n", SDL_GetCurrentVideoDriver(),
++                hle_screen_gl == 2 ? "Vulkan" : "OpenGL");
++        return 0;
++    }
+ #ifdef __EMSCRIPTEN__
+     /* In a browser the game runs on a worker thread and the canvas belongs
+      * to the page's: SDL's GL renderer would need the WebGL context made
+diff --git a/runtime/win32hle/win32hle.h b/runtime/win32hle/win32hle.h
+index 091a61e..f6e0019 100644
+--- a/runtime/win32hle/win32hle.h
++++ b/runtime/win32hle/win32hle.h
+@@ -163,6 +163,14 @@ uint32_t hle_focus_window(void);
+ uint32_t hle_send(uint32_t hwnd, uint32_t msg, uint32_t wParam, uint32_t lParam);   /* SendMessageA */
+ extern void (*hle_dialog_hook)(uint32_t hwnd, uint32_t resource_id);   /* a dialog made from a resource */
+ extern void (*hle_cursor_hook)(int x, int y);                          /* the guest moved the cursor */
++/* GL mode: set hle_screen_gl before hle_screen_open (1 OpenGL, 2 Vulkan) and
++ * the window is made for that API with no SDL renderer; the host's 3D layer
++ * draws into it (hle_screen_sdl_window) and says where its picture lies
++ * (hle_screen_gl_picture: source size, then the rectangle in drawable
++ * pixels), so the mouse maps onto the game's coordinates. */
++extern int hle_screen_gl;
++struct SDL_Window *hle_screen_sdl_window(void);
++void hle_screen_gl_picture(int src_w, int src_h, int x, int y, int w, int h);
+ /* A cursor from the guest's resources (LoadCursorA), 32x32 monochrome, rows top-down. */
+ typedef struct { uint32_t handle; int hot_x, hot_y; uint8_t and_mask[128], xor_mask[128]; } hle_cursor_image_t;
+ const hle_cursor_image_t *hle_cursor_image(uint32_t handle);   /* NULL: not one of those (show the system arrow) */
+-- 
+2.53.0
+

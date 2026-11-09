@@ -1,0 +1,82 @@
+From b11419172b3b30f019b9b46ec86a1713c2813001 Mon Sep 17 00:00:00 2001
+From: neurocontrarian <56934000+neurocontrarian@users.noreply.github.com>
+Date: Sat, 7 Nov 2026 11:27:03 -0500
+Subject: [PATCH] win32hle: VirtualFree releases only a whole reservation; a
+ wait survives its handle being closed
+
+VirtualFree(MEM_RELEASE) on an address inside a reservation, or with a
+non-zero size, fails with ERROR_INVALID_PARAMETER as on Windows, instead of
+releasing the whole reservation. Operation Flashpoint calls it on blocks
+inside its own memory pool.
+
+hle_wait: a handle that becomes invalid after the first poll (closed by
+another thread while this one waits) counts as signalled, as the Windows
+wait holds the object. Invalid on the first poll still fails.
+---
+ CHANGELOG.md                |  8 ++++++++
+ runtime/win32hle/kernel32.c | 14 ++++++++++++--
+ 2 files changed, 20 insertions(+), 2 deletions(-)
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index b4eaae4..9a8c9c4 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -6,6 +6,14 @@ versions follow [SemVer](https://semver.org/).
+ ## [Unreleased]
+ 
+ ### Fixed
++- win32hle: `VirtualFree(MEM_RELEASE)` fails with `ERROR_INVALID_PARAMETER`,
++  as on Windows, unless it names a whole reservation by its base with size 0.
++  It released the whole reservation instead: Operation Flashpoint calls it on
++  blocks inside its own memory pool and lost the pool.
++- win32hle: a handle closed by another thread while a wait is on it wakes the
++  wait as signalled (Windows keeps the object alive for the wait) instead of
++  failing it. Operation Flashpoint closes an event its watchdog thread waits
++  on when it exits. A handle already invalid on the first poll still fails.
+ - lift32: `fsincos` left the sine in ST(0) and the cosine in ST(1); it is
+   the other way round. MechCommander 2's camera builds its view direction
+   with it, and the swapped pair laid the 35-degree camera almost flat on the
+diff --git a/runtime/win32hle/kernel32.c b/runtime/win32hle/kernel32.c
+index c4cd821..bb8c129 100644
+--- a/runtime/win32hle/kernel32.c
++++ b/runtime/win32hle/kernel32.c
+@@ -236,6 +236,11 @@ static void k_VirtualFree(void) {                        /* (addr, size, type) *
+     int i = region_of(addr);
+     if (i < 0) { g_last_error = ERROR_INVALID_PARAMETER; RET(0, 3); }
+     if (type & MEM_RELEASE) {
++        /* as Windows: only a whole reservation, by its base and size 0. A
++         * release of a block inside one (a game freeing a chunk it
++         * committed in its own pool) fails there and must fail here, or
++         * the whole pool goes with it. */
++        if (addr != g_region[i].base || size) { g_last_error = ERROR_INVALID_PARAMETER; RET(0, 3); }
+         hle_vm_release(g_region[i].base, g_region[i].size);
+         g_region[i].size = 0;
+     } else if (type & MEM_DECOMMIT) {
+@@ -445,9 +450,14 @@ static int try_take(uint32_t h) {
+     }
+ }
+ 
++/* A handle closed while a thread waits on it (a game that signals its
++ * worker's event, then closes it and frees the worker's object, as at exit):
++ * on Windows the wait holds the object and wakes signalled; here the closed
++ * handle is seen on a later poll, so it counts as signalled then. Invalid on
++ * the first poll is invalid. */
+ uint32_t hle_wait(int n, const uint32_t *h, int all, uint32_t timeout) {
+     uint32_t start = ticks_ms();
+-    for (;;) {
++    for (int first = 1;; first = 0) {
+         if (all) {
+             int ready = 1;
+             for (int i = 0; i < n; i++) { int r = try_take(h[i]); if (r < 0) return WAIT_FAILED; if (!r) { ready = 0; break; } }
+@@ -455,7 +465,7 @@ uint32_t hle_wait(int n, const uint32_t *h, int all, uint32_t timeout) {
+         } else {
+             for (int i = 0; i < n; i++) {
+                 int r = try_take(h[i]);
+-                if (r < 0) { g_last_error = ERROR_INVALID_HANDLE; return WAIT_FAILED; }
++                if (r < 0 && first) { g_last_error = ERROR_INVALID_HANDLE; return WAIT_FAILED; }
+                 if (r) return WAIT_OBJECT_0 + (uint32_t)i;
+             }
+         }
+-- 
+2.53.0
+

@@ -1,0 +1,54 @@
+# The game's files (copyright, size)
+*.flatimage
+extracted/
+*.dwarfs
+*.pbo
+*.PBO
+*.exe
+*.dll
+*.vpfs
+# pcrecomp's output
+gen/
+build/
+work/
+*.json.gz
+# Other projects' checkouts
+pcrecomp/
+third_party/
+# Secrets
+.env
+*.key
+*.pem
+
+# FlatImage runtime data
+.*.flatimage.config/
+
+# Playable copy of the game
+OperationFlashpoint/
+
+# Python environment
+.venv/
+
+# Generated code (never in git)
+src/recomp/gen/
+build-linux*/
+# test builds (tools/build_variant.sh)
+build-*/
+build-*.log
+build-*.done
+game/
+
+# Performance logs
+logs/
+
+# Python
+__pycache__/
+
+# Local launchers of this machine
+Jouer-Recomp.sh
+Lancer-Operation-Flashpoint.sh
+Operation-Flashpoint*.desktop
+src/third_party/
+tools/extract_flatimage.sh
+tools/vpfs_carve_pe.py
+tools/rebuild_pe_from_dump.py
