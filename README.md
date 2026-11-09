@@ -1,22 +1,50 @@
-# OFP Recomp: Operation Flashpoint / Arma: Cold War Assault on Linux
+# OFP Recomp: Operation Flashpoint on Linux, natively
 
-A static recompilation of **Arma: Cold War Assault 1.99** (Operation Flashpoint: Cold War
-Crisis, as re-released by Bohemia Interactive) into a native 64-bit Linux program, built on
-[pcrecomp](https://github.com/sp00nznet/pcrecomp). No emulator, no Wine: `ColdWarAssault.exe`
-is translated to C (25,665 functions), compiled, and runs on pcrecomp's Win32 layer
-(`win32hle`) with host code for what the game needs beyond it.
+Play **Arma: Cold War Assault 1.99** (Operation Flashpoint: Cold War Crisis, as re-released by
+Bohemia Interactive) as a real Linux program: no Wine, no emulator. The game's own program is
+translated and rebuilt for Linux, then runs with your copy of the game.
 
 **No game file is in this repository.** You need your own copy of the game.
 
+## What you get over the original
+
+- **Native Linux, 64-bit.** The game gets a full 4 GB of memory of its own.
+- **No more "Out of reserved memory".** The original stops at 1 GB of working memory, which
+  long view distances run out of; here it is 1.5 GB by default, up to 2 GB.
+- **Vulkan or OpenGL** instead of Direct3D 8, switched from inside the game.
+- **Antialiasing** 2x, 4x or 8x for smooth edges.
+- **Vertical sync** on or off, and a frames-per-second counter.
+- **In-game options** for all of the above: Pause key or Ctrl+O, or the "Linux options"
+  button in the game's Options screen. They are kept in `Options.txt`.
+- **The Internet server list is back.** GameSpy closed in 2014; the Multiplayer list now shows
+  the 1.99 servers of the community master server, with ping and players.
+- **Long view distances, fewer stutters.** Building the terrain, which caused stutters when
+  turning, was made twice as fast; at the longest view distance and finest terrain the stutters
+  went from about 9 to about 2 a minute.
+- **Take it to another PC:** one self-contained folder (game, program, graphics drivers),
+  nothing to install there.
+- **Logs for bug reports:** frame rate, slow frames and their causes, settings.
+
+## Performance
+
+On a 2017 desktop (Core i5-8600K, Radeon RX 5700 XT, Linux Mint 22): about 60 fps most of the
+time at the longest view distance and finest terrain, 35 to 45 fps in the busiest scenes.
+
 ## State (November 2026)
 
-- Menus, single missions and campaign missions run. Multiplayer: the LAN and Internet server
-  lists show (with ping and players); joining or hosting a game has not been tried.
-- On a 2017 desktop CPU (i5-8600K) the game holds about 60 fps at the longest view distance
-  and finest terrain grid most of the time; terrain building stutters went from 8.8 to 2.1
-  frames of 100 ms or more a minute during the last week's work.
-- Played on Linux Mint 22 (AMD GPU, Vulkan and OpenGL); benchmarked on Ubuntu 24.04 (NVIDIA,
-  virtual screen).
+- Menus, single missions and campaign missions run.
+- Multiplayer: the LAN and Internet server lists work; joining or hosting a game has not been
+  tried yet.
+- Like the original, the game itself runs on one processor core; that core is what limits the
+  frame rate in busy scenes. Moving the drawing to a second core is planned.
+- Played on Linux Mint 22 (AMD graphics, Vulkan and OpenGL) and Ubuntu 24.04 (NVIDIA).
+
+## What you need
+
+- A 64-bit Linux PC with Vulkan 1.3 or OpenGL 2.1 graphics; 16 GB of memory recommended for
+  the build (8 GB works, slower).
+- Your copy of Arma: Cold War Assault 1.99, with `ColdWarAssault.exe` 1.99 (see
+  [INSTALL.md](INSTALL.md) for the exact version).
 
 ## Building and playing
 
@@ -32,40 +60,11 @@ build-linux64/ofp --run --game <folder with the game's data and ColdWarAssault.e
 `tools/make_package.sh` makes a self-contained folder (program, data, libraries) for another
 Linux PC.
 
-## What is host code
+## For developers
 
-| Piece | Where |
-| --- | --- |
-| Direct3D 8 → Vulkan 1.3 (VMA) or OpenGL 2.1: fixed-function T&L, multitexture, fog, render targets, MSAA | `src/linux/d3d8*.c` |
-| DirectInput 8 (keyboard, mouse) on SDL2 | `src/linux/dinput8.c` |
-| Intel JPEG Library 1.5 on stb_image, Immersion IFC22 as an absent device | `src/linux/ijl15.c`, `ifc22.c` |
-| Internet server list (the community master server) | `src/linux/ofp_net.c` |
-| Performance log (time per import, game code share, slow frames and their causes) | `src/linux/perf.c` |
-| Hand-written replacements of a few lifted functions, each checked against the lifted code | `src/linux/ofp_native.c` |
-
-pcrecomp itself is used at upstream `ef3f0da` with `patches/pcrecomp-ofp.patch` on top
-(DirectSound 3D, Winsock `select`, a 4 GB address space, an x87 stack kept in locals, faster
-indirect calls...). Those changes are offered upstream one by one (`patches/upstream/`).
-
-## Making it fast
-
-The lifted code started at a few frames per second in heavy scenes. What helped most, with
-measurements, is in [`docs/plan-acceleration.md`](docs/plan-acceleration.md):
-
-- the x87 stack as a moving pointer and in local variables (+47 % frames);
-- a per-call-site cache for indirect calls (C++ virtual calls, about two million a second),
-  imports looked up first;
-- profile-guided optimisation and `-march=x86-64-v3` on the generated C;
-- for the terrain builder, which caused the stutters when turning: hand-written vertex search
-  and index-buffer code, and **`tools/region_c.py`**, which translates one hot loop of a
-  lifted function again with the function's stack slots and the x87 stack in C variables
-  (a slot whose address is taken stays in guest memory). A terrain segment went from 16.9 ms
-  to 8.7 ms to build.
-
-Every native replacement has a check mode (`OFP_NATIVE=check`) that runs it next to the
-lifted code and compares the results, and `OFP_TRACE_HASH=1` fingerprints every terrain vertex
-and face built, so a translated region can be compared with the lifted code over millions of
-calls.
+How it is made (pcrecomp, the host code for Direct3D 8, DirectInput, sound and network, and
+the performance work with its measurements): [docs/developers.md](docs/developers.md) and
+[docs/plan-acceleration.md](docs/plan-acceleration.md).
 
 ## License and thanks
 
