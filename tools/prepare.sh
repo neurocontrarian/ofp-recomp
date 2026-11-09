@@ -12,7 +12,6 @@ EXE_IN=$1
 [ -f "$EXE_IN" ] || { echo "usage: tools/prepare.sh /path/to/ColdWarAssault.exe" >&2; exit 1; }
 EXE_IN=$(readlink -f "$EXE_IN")
 cd "$(dirname "$0")/.."
-KNOWN_SHA256=2db665ee6edb115636e2a8dc642d5862b7d91c250f56045785e60562ff0f7ed3
 
 # 1. pcrecomp
 if [ ! -d third_party/pcrecomp ]; then
@@ -33,10 +32,6 @@ PY=.venv/bin/python
 
 # 3. the game's program, analysed
 mkdir -p work/analysis
-if [ "$(sha256sum "$EXE_IN" | cut -d' ' -f1)" != $KNOWN_SHA256 ]; then
-  echo "[!] This ColdWarAssault.exe is not the copy the project was made with" >&2
-  echo "    (sha256 $KNOWN_SHA256). run_lift.py stops if it is not 1.99." >&2
-fi
 [ "$EXE_IN" = "$(readlink -f work/ColdWarAssault.exe 2>/dev/null)" ] || cp "$EXE_IN" work/ColdWarAssault.exe
 if [ ! -f work/analysis/functions.json ]; then
   $PY -I third_party/pcrecomp/tools/cpp/rtti.py work/ColdWarAssault.exe \

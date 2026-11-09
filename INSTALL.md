@@ -17,12 +17,10 @@ packages under their own names.
   - its data folders: `AddOns`, `BIN`, `Campaigns`, `DTA`, `Missions`,
     `MPMissions`, `SPTemplates`, `Templates`, `Worlds`, and `Products.cfg`;
   - its program, `ColdWarAssault.exe`, version 1.99, PE timestamp
-    `0x58BD672D` (6 March 2017). The project was made with the copy whose
-    SHA-256 is
-    `2db665ee6edb115636e2a8dc642d5862b7d91c250f56045785e60562ff0f7ed3`
-    (the one inside the game's Linux release by Virtual Programming). Copies
-    from the Windows releases have not been tried: if their timestamp
-    differs, step 3 stops with a message and nothing is built.
+    `0x58BD672D` (6 March 2017). The project was made with the copy inside
+    the game's Linux release by Virtual Programming. Copies from the Windows
+    releases have not been tried: if their timestamp differs, step 3 stops
+    with a message and nothing is built.
 
 ## 1. Packages
 
