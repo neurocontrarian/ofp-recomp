@@ -18,9 +18,8 @@ translated and rebuilt for Linux, then runs with your copy of the game.
   button in the game's Options screen. They are kept in `Options.txt`.
 - **The Internet server list is back.** GameSpy closed in 2014; the Multiplayer list now shows
   the 1.99 servers of the community master server, with ping and players.
-- **Long view distances, fewer stutters.** Building the terrain, which caused stutters when
-  turning, was made twice as fast; at the longest view distance and finest terrain the stutters
-  went from about 9 to about 2 a minute.
+- **Maximum view distance and terrain detail are playable**, with only rare short stutters
+  when turning.
 - **Take it to another PC:** one self-contained folder (game, program, graphics drivers),
   nothing to install there.
 - **Logs for bug reports:** frame rate, slow frames and their causes, settings.
