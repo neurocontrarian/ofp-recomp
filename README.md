@@ -18,6 +18,20 @@ is translated to C (25,665 functions), compiled, and runs on pcrecomp's Win32 la
 - Played on Linux Mint 22 (AMD GPU, Vulkan and OpenGL); benchmarked on Ubuntu 24.04 (NVIDIA,
   virtual screen).
 
+## Building and playing
+
+See **[INSTALL.md](INSTALL.md)**. In short, on Ubuntu 24.04 or Linux Mint 22, with your own
+`ColdWarAssault.exe` 1.99 and the game's data:
+
+```sh
+tools/prepare.sh /path/to/ColdWarAssault.exe   # pcrecomp, analysis, lifted C (10-30 min)
+./build-linux64.sh -j4                         # build-linux64/ofp (20-60 min)
+build-linux64/ofp --run --game <folder with the game's data and ColdWarAssault.exe>
+```
+
+`tools/make_package.sh` makes a self-contained folder (program, data, libraries) for another
+Linux PC.
+
 ## What is host code
 
 | Piece | Where |
@@ -52,20 +66,6 @@ Every native replacement has a check mode (`OFP_NATIVE=check`) that runs it next
 lifted code and compares the results, and `OFP_TRACE_HASH=1` fingerprints every terrain vertex
 and face built, so a translated region can be compared with the lifted code over millions of
 calls.
-
-## Building and playing
-
-See **[INSTALL.md](INSTALL.md)**. In short, on Ubuntu 24.04 or Linux Mint 22, with your own
-`ColdWarAssault.exe` 1.99 and the game's data:
-
-```sh
-tools/prepare.sh /path/to/ColdWarAssault.exe   # pcrecomp, analysis, lifted C (10-30 min)
-./build-linux64.sh -j4                         # build-linux64/ofp (20-60 min)
-build-linux64/ofp --run --game <folder with the game's data and ColdWarAssault.exe>
-```
-
-`tools/make_package.sh` makes a self-contained folder (program, data, libraries) for another
-Linux PC.
 
 ## License and thanks
 
