@@ -69,8 +69,9 @@ the performance work with its measurements): [docs/developers.md](docs/developer
 
 This project is under the [PolyForm Noncommercial License 1.0.0](LICENSE.md): you may use,
 change and share it for any noncommercial purpose; commercial use, direct or indirect, is not
-allowed. The patches to pcrecomp (`patches/pcrecomp-ofp.patch` and `patches/upstream/`) are
-offered under pcrecomp's own MIT license, so that they can go upstream.
+allowed. The parts that are not specific to this game (the Direct3D 8, DirectInput and JPEG
+layers, the loop translator, and the changes to pcrecomp) are also available under the MIT
+license, so that they can go into pcrecomp: the list is in [LICENSE-MIT.md](LICENSE-MIT.md).
 
 The game and its data belong to Bohemia Interactive; none of it is in this repository. Thanks
 to sp00nznet for pcrecomp.
