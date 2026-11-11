@@ -5,6 +5,11 @@ patch, author neurocontrarian. **Sent on 2026-11-08** from the fork neurocontrar
 PRs #168 (7), #169 (1), #170 (5), #171 (8), #172 (2), #173 (6), #174 (4), #175 (9), #176 (3),
 and the offer issue #177. The offered host files are also under MIT (LICENSE-MIT.md).
 
+**2026-11-10**: #168-#175 merged upstream (91998d6). **2026-11-11**: #176
+rebased on main (93a7432) with the review fixes (listener keeps its own
+reference, a 3D interface holds its buffer, no pan on a 3D buffer) and a
+`dsound_selftest.c`; 15/15 selftests in both modes. #177 has no answer yet.
+
 | # | Branch / patch | What it does |
 |---|---|---|
 | 1 | `win32hle-virtualfree-wait` | VirtualFree(MEM_RELEASE) only on a whole reservation; a wait survives its handle being closed |
