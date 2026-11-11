@@ -10,6 +10,23 @@ rebased on main (93a7432) with the review fixes (listener keeps its own
 reference, a 3D interface holds its buffer, no pan on a 3D buffer) and a
 `dsound_selftest.c`; 15/15 selftests in both modes. #177 has no answer yet.
 
+Optional follow-ups the maintainer suggested in his merge comments (not done):
+- #169: `WaitForMultipleObjects` wait-all still returns WAIT_FAILED when a
+  handle is closed mid-wait; a selftest for VirtualFree(MEM_RELEASE) inside a
+  reservation.
+- #170: with `hle_vm_any_hi` raised, GetSystemInfo should report the higher
+  top address.
+- #171: check the unconditional `SDL_vulkan.h` include still builds in the
+  Emscripten host (#148).
+- #172: clamp `select`'s timeout (huge tv_sec overflows; negative → 0); a
+  UDP-pair selftest.
+- #173: a shim that throws leaves `hle_in_shim_main` set (profiling only).
+- #174: say in a comment/README that "imports first" is always on in win32hle
+  and that the caches assume `recomp_lookup_manual` answers never change.
+- #175: make `RECOMP_X87_RING` a build error outside win32hle (native32,
+  bridge, dos32 still use `g_st`/`g_fp_top`); a ring selftest across both
+  buffer ends plus the locals path.
+
 | # | Branch / patch | What it does |
 |---|---|---|
 | 1 | `win32hle-virtualfree-wait` | VirtualFree(MEM_RELEASE) only on a whole reservation; a wait survives its handle being closed |
